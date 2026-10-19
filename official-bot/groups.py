@@ -98,6 +98,8 @@ def ensure_group(goid: str, name: str = "", extra: dict | None = None) -> tuple[
     if extra:
         cfg.update(extra)
     (gd / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not (gd / "prompt.md").exists() and (DEFAULT_DIR / "prompt.md").exists():
+        (gd / "prompt.md").write_text((DEFAULT_DIR / "prompt.md").read_text(encoding="utf-8"), encoding="utf-8")
     if not (gd / "notes.md").exists():
         (gd / "notes.md").write_text(f"# {cfg['name']} 群笔记\n\n（自动创建；在这里记录本群的事实、约定、常见问题）\n", encoding="utf-8")
     return load_config(goid) or cfg, True

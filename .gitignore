@@ -37,6 +37,7 @@
 
 # --- sanitized templates (real per-group config.json stays local) ---
 !/official-bot/groups/_default/config.json
+!/official-bot/groups/_default/prompt.md
 !/official-bot/groups/config.example.json
 
 # --- safety net: never track these even if whitelisted above by mistake ---
