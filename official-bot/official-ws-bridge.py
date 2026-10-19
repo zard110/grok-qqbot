@@ -793,6 +793,13 @@ class Bridge:
                 self.ws.run_forever(ping_interval=0)
             except Exception as e:
                 log(f"loop error: {e}")
+                if "401" in str(e):
+                    # cached access token went stale: drop it so the next try fetches a fresh one
+                    self.token = ""
+                    self.token_at = 0.0
+                    _token_holder["t"] = ""
+                    _token_holder["at"] = 0.0
+                    log("401 -> cleared cached token")
             log("reconnect in 5s")
             time.sleep(5)
 
