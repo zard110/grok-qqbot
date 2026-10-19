@@ -1,0 +1,48 @@
+# WHITELIST style: ignore everything, then allow only reviewed code/docs.
+# Secrets, group configs, chat logs, runtime data, media, NapCat (retired) and backups stay local.
+*
+!*/
+# per-group folders (openid names, configs, chat logs, knowledge repos) never tracked, except the template
+/official-bot/groups/*/
+!/official-bot/groups/_default/
+/official-bot/c2c/
+/official-bot/_system/
+/official-bot/media/
+/forwarder/
+/github/
+
+# --- top level ---
+!/.gitignore
+!/README.md
+!/ensure-bots.sh
+!/tools/
+!/tools/secret-scan.sh
+
+# --- official bot code ---
+!/official-bot/official-ws-bridge.py
+!/official-bot/send_group.py
+!/official-bot/groups.py
+!/official-bot/kb.py
+!/official-bot/run-official-ws.sh
+!/official-bot/intents.txt
+!/official-bot/tests/intent_probe.py
+!/official-bot/keyboards/*.json
+
+# --- docs ---
+!/official-bot/README.md
+!/official-bot/USAGE.md
+!/official-bot/MULTIGROUP.md
+!/official-bot/docs-explore.md
+!/official-bot/secrets.example.md
+
+# --- sanitized templates (real per-group config.json stays local) ---
+!/official-bot/groups/_default/config.json
+!/official-bot/groups/config.example.json
+
+# --- safety net: never track these even if whitelisted above by mistake ---
+*.bak*
+*.log
+*.jsonl
+*.lock
+__pycache__/
+*.pyc

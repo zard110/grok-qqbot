@@ -1,0 +1,6 @@
+{"rows":[{"buttons":[
+ {"id":"A","group_id":"q1","render_data":{"label":"A","visited_label":"A ✓","style":1},"action":{"type":1,"permission":{"type":2},"data":"quiz:q1:A","unsupport_tips":"请升级QQ"}},
+ {"id":"B","group_id":"q1","render_data":{"label":"B","visited_label":"B ✓","style":1},"action":{"type":1,"permission":{"type":2},"data":"quiz:q1:B","unsupport_tips":"请升级QQ"}},
+ {"id":"C","group_id":"q1","render_data":{"label":"C","visited_label":"C ✓","style":1},"action":{"type":1,"permission":{"type":2},"data":"quiz:q1:C","unsupport_tips":"请升级QQ"}},
+ {"id":"D","group_id":"q1","render_data":{"label":"D","visited_label":"D ✓","style":1},"action":{"type":1,"permission":{"type":2},"data":"quiz:q1:D","unsupport_tips":"请升级QQ"}}
+]}]}

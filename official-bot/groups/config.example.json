@@ -1,0 +1,34 @@
+{
+  "name": "示例群名",
+  "aliases": [
+    "example"
+  ],
+  "group_openid": "<GROUP_OPENID_32_HEX>",
+  "qq_group_id": null,
+  "enabled": true,
+  "features": {
+    "natural_reply": true,
+    "at_reply": true,
+    "daily_ai_news": false,
+    "x_info_push": false,
+    "image_gen": true,
+    "buttons": true,
+    "welcome": true,
+    "media_understanding": true,
+    "knowledge": true
+  },
+  "style": "本群回复风格，例如：轻量 emoji，【】小标题+编号列表，一次回复合成一条消息。",
+  "admins": [
+    "<MEMBER_OPENID>"
+  ],
+  "knowledge": {
+    "docs_dir": "knowledge/",
+    "repos": [
+      {
+        "url": "https://github.com/<owner>/<repo>",
+        "branch": "main",
+        "local_path": "knowledge/repos/<repo>"
+      }
+    ]
+  }
+}

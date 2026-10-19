@@ -1,0 +1,18 @@
+{
+  "_comment": "Template for groups the bot gets added to. Auto-created groups answer @ politely only; turn features on in their own config.json.",
+  "enabled": true,
+  "features": {
+    "natural_reply": false,
+    "at_reply": true,
+    "daily_ai_news": false,
+    "x_info_push": false,
+    "image_gen": false,
+    "buttons": false,
+    "welcome": false,
+    "media_understanding": true,
+    "knowledge": true
+  },
+  "style": "礼貌、简洁，用中文回答；只在被 @ 时回复；不主动推送。",
+  "admins": [],
+  "knowledge": {"docs_dir": "knowledge/", "repos": []}
+}

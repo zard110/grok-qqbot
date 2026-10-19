@@ -1,0 +1,4 @@
+{"rows":[{"buttons":[
+ {"id":"ride_yes","render_data":{"label":"🚴 骑了","visited_label":"🚴 骑了","style":4},"action":{"type":2,"permission":{"type":2},"data":"/打卡 骑了","reply":false,"unsupport_tips":"请升级QQ后点击"}},
+ {"id":"ride_no","render_data":{"label":"😴 还没","visited_label":"😴 还没","style":0},"action":{"type":2,"permission":{"type":2},"data":"/打卡 还没","reply":false,"unsupport_tips":"请升级QQ后点击"}}
+]}]}

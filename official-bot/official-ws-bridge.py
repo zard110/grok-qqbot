@@ -1,0 +1,807 @@
+#!/usr/bin/env python3
+"""Official QQ bot (MaxShenBi) gateway bridge → Grok webhook (OneBot-compatible)."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+import sys
+
+DIR = Path("/workspace/qq-bot-persist/official-bot")
+if str(DIR) not in sys.path:
+    sys.path.insert(0, str(DIR))
+import groups as G  # noqa: E402  per-group registry
+FORWARDER = Path("/root/forwarder")
+LOG = DIR / "official-ws-bridge.log"
+# Local identity values live in git-ignored files next to this script (see secrets.example.md).
+def _local_int(name: str, default: int = 0) -> int:
+    try:
+        return int((DIR / name).read_text(encoding="utf-8").strip())
+    except Exception:
+        return default
+
+
+def _local_str(name: str, default: str) -> str:
+    try:
+        return (DIR / name).read_text(encoding="utf-8").strip() or default
+    except Exception:
+        return default
+
+
+BOT_UIN = _local_int("bot_uin.txt")
+BOT_NAME = _local_str("bot_name.txt", "MaxShenBi")
+API = "https://api.sgroup.qq.com"
+TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
+# GROUP messages + public messages (covers GROUP_MESSAGE_CREATE / GROUP_AT_MESSAGE_CREATE)
+INTENTS = (1 << 25) | (1 << 30)
+try:
+    _iv = (Path(__file__).resolve().parent / "intents.txt").read_text().strip()
+    if _iv:
+        INTENTS = int(_iv, 0)
+except Exception:
+    pass
+
+AT_RE = re.compile(r"<@!?([A-Fa-f0-9]+)>")
+
+
+def log(msg: str) -> None:
+    # run-official-ws.sh redirects stdout → official-ws-bridge.log
+    print(time.strftime("[%F %T] ") + msg, flush=True)
+
+
+def rd(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def get_token() -> str:
+    appid = rd(DIR / "appid")
+    secret = rd(DIR / "appsecret")
+    body = json.dumps({"appId": appid, "clientSecret": secret}).encode()
+    req = urllib.request.Request(
+        TOKEN_URL,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = json.loads(r.read().decode())
+    token = data.get("access_token") or ""
+    if not token:
+        raise RuntimeError(f"no access_token: {data}")
+    return token
+
+
+def get_gateway(token: str) -> str:
+    req = urllib.request.Request(
+        API + "/gateway",
+        headers={"Authorization": f"QQBot {token}"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = json.loads(r.read().decode())
+    url = data.get("url") or ""
+    if not url.startswith("wss://"):
+        raise RuntimeError(f"bad gateway: {data}")
+    return url
+
+
+def member_user_id(member_openid: str) -> int:
+    """Stable non-zero int from openid (OneBot field); not a real QQ number."""
+    if not member_openid:
+        return 0
+    h = hashlib.sha1(member_openid.encode()).hexdigest()[:8]
+    return int(h, 16) % 2_000_000_000 or 1
+
+
+def strip_at(content: str) -> str:
+    return AT_RE.sub("", content or "").strip()
+
+
+def is_at_me(d: dict, bot_openid: str, event_t: str) -> bool:
+    if event_t == "GROUP_AT_MESSAGE_CREATE":
+        return True
+    content = d.get("content") or ""
+    if bot_openid and bot_openid in content:
+        return True
+    for m in d.get("mentions") or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("is_you") or (bot_openid and m.get("id") == bot_openid):
+            return True
+        if m.get("bot") and m.get("username") == BOT_NAME:
+            return True
+    return False
+
+
+FACE_RE = re.compile(r'<faceType=\d+,faceId="[^"]*"(?:,ext="([^"]*)")?>')
+REF_CACHE_FILE = DIR / "ref-cache.json"
+_ref_cache: dict = {}
+try:
+    _ref_cache = json.loads(REF_CACHE_FILE.read_text(encoding="utf-8"))
+except Exception:
+    _ref_cache = {}
+
+
+def _ext_map(d: dict) -> dict:
+    out = {}
+    for kv in ((d.get("message_scene") or {}).get("ext") or []):
+        if isinstance(kv, str) and "=" in kv:
+            k, v = kv.split("=", 1)
+            out[k] = v
+    return out
+
+
+def ref_cache_put(idx: str, name: str, text: str, goid: str = "") -> None:
+    if not idx:
+        return
+    _ref_cache[idx] = {"name": name, "text": (text or "")[:300], "ts": int(time.time()), "g": goid}
+    if len(_ref_cache) > 600:
+        for k in sorted(_ref_cache, key=lambda k: _ref_cache[k].get("ts", 0))[:200]:
+            _ref_cache.pop(k, None)
+    try:
+        REF_CACHE_FILE.write_text(json.dumps(_ref_cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def ref_lookup(idx: str, goid: str = "") -> dict | None:
+    if not idx:
+        return None
+    hit = _ref_cache.get(idx)
+    if hit and (not goid or not hit.get("g") or hit.get("g") == goid):
+        return hit
+    # our own sends: send_group.py stores ext_info.ref_idx in the group's sent-log.jsonl
+    sl = (G.group_dir(goid) / "sent-log.jsonl") if goid else (DIR / "sent-log.jsonl")
+    try:
+        for line in reversed(open(sl, encoding="utf-8").readlines()[-300:]):
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("ref_idx") == idx:
+                return {"name": BOT_NAME, "text": (e.get("content") or "")[:300]}
+    except Exception:
+        pass
+    return None
+
+
+def _face_sub(m: "re.Match") -> str:
+    txt = ""
+    try:
+        import base64
+        txt = json.loads(base64.b64decode(m.group(1) or "").decode("utf-8", "ignore")).get("text") or ""
+    except Exception:
+        pass
+    return f"[表情{(':' + txt) if txt else ''}]"
+
+
+def _att_list(atts) -> tuple[list, list]:
+    """normalize attachments -> (list of dicts, placeholder strings)"""
+    out, ph = [], []
+    for a in atts or []:
+        if not isinstance(a, dict):
+            continue
+        ct = (a.get("content_type") or "").lower()
+        item = {k: a.get(k) for k in ("url", "content_type", "filename", "size", "width", "height") if a.get(k) not in (None, "")}
+        url = a.get("url") or ""
+        if url.startswith("//"):
+            url = "https:" + url
+            item["url"] = url
+        if ct.startswith("image"):
+            item["kind"] = "image"
+            ph.append(f"[图片: {url}]" if url else "[图片]")
+        elif ct == "voice" or ct.startswith("audio"):
+            item["kind"] = "voice"
+            asr = a.get("asr_refer_text") or ""
+            if a.get("voice_wav_url"):
+                item["voice_wav_url"] = a["voice_wav_url"]
+            if asr:
+                item["asr_refer_text"] = asr
+            ph.append(f"[语音转文字: {asr}]" if asr else f"[语音: {a.get('voice_wav_url') or url}]")
+        elif ct.startswith("video"):
+            item["kind"] = "video"
+            ph.append(f"[视频: {url}]" if url else "[视频]")
+        else:
+            item["kind"] = "file"
+            ph.append(f"[文件: {a.get('filename') or ''}{(' ' + url) if url else ''}]")
+        out.append(item)
+    return out, ph
+
+
+def _ark_info(ark) -> tuple[dict | None, str]:
+    if not isinstance(ark, dict) or not ark:
+        return None, ""
+    f = ark.get("fields") or {}
+    if not isinstance(f, dict):
+        f = {}
+    info = {
+        "ark_type": ark.get("ark_type") or "",
+        "ark_name": ark.get("ark_name") or "",
+        "prompt": ark.get("prompt") or "",
+        "title": f.get("title") or "",
+        "desc": f.get("desc") or "",
+        "url": f.get("jump_url") or f.get("url") or "",
+        "source": f.get("source") or f.get("tag") or "",
+    }
+    label = info["title"] or info["prompt"] or info["desc"]
+    return info, f"[卡片{('(' + info['ark_name'] + ')') if info['ark_name'] else ''}: {label}{(' ' + info['url']) if info['url'] else ''}]"
+
+
+def _elements_text(els, depth: int = 0) -> list[str]:
+    parts = []
+    for el in els or []:
+        if not isinstance(el, dict) or depth > 3:
+            continue
+        who = ((el.get("author") or {}).get("username")) or ""
+        c = FACE_RE.sub(_face_sub, strip_at(el.get("content") or "")).strip()
+        _, ph = _att_list(el.get("attachments"))
+        _, arkph = _ark_info(el.get("ark_data"))
+        seg = " ".join(x for x in [c] + ph + ([arkph] if arkph else []) if x)
+        if seg:
+            parts.append(f"{who + ': ' if who else ''}{seg}")
+        parts += _elements_text(el.get("msg_elements"), depth + 1)
+    return parts
+
+
+def enrich(d: dict, text: str, goid: str = "") -> dict:
+    """Extract non-text info. Returns dict with attachments/quoted/card/raw_message/ref_idx."""
+    text = FACE_RE.sub(_face_sub, text or "").strip()
+    atts, ph = _att_list(d.get("attachments"))
+    card, cardph = _ark_info(d.get("ark_data"))
+    ext = _ext_map(d)
+    quoted = None
+    qtext = ""
+    mt = d.get("message_type")
+    els = d.get("msg_elements") or []
+    if els:
+        parts = _elements_text(els)
+        qtext = "\n".join(parts)[:600]
+        if qtext:
+            quoted = {"source": "msg_elements", "message_type": mt, "text": qtext}
+    ref = ext.get("ref_msg_idx") or ""
+    if ref:
+        hit = ref_lookup(ref, goid)
+        if hit:
+            quoted = quoted or {}
+            quoted.update({"ref_idx": ref, "name": hit.get("name"), "text": quoted.get("text") or hit.get("text")})
+            qtext = qtext or f"{hit.get('name')}: {hit.get('text')}"
+        elif not quoted:
+            quoted = {"ref_idx": ref, "text": "", "note": "被引用消息不在缓存里（可能是很早的消息）"}
+    raw_parts = []
+    if quoted:
+        raw_parts.append(f"[引用: {qtext[:300]}]" if qtext else "[引用了一条较早的消息]")
+    if text:
+        raw_parts.append(text)
+    raw_parts += ph
+    if cardph:
+        raw_parts.append(cardph)
+    return {
+        "text": text,
+        "raw_message": " ".join(raw_parts).strip(),
+        "attachments": atts,
+        "quoted": quoted,
+        "card": card,
+        "ref_idx": ext.get("msg_idx") or "",
+        "content_type": mt,
+    }
+
+
+def group_qq_id(cfg: dict | None, goid: str) -> int:
+    q = (cfg or {}).get("qq_group_id")
+    try:
+        if q:
+            return int(q)
+    except Exception:
+        pass
+    return member_user_id(goid)  # stable pseudo id for groups whose QQ number we don't know
+
+
+_token_holder = {"t": "", "at": 0.0}
+
+
+def _api_token() -> str:
+    if _token_holder["t"] and time.time() - _token_holder["at"] < 6000:
+        return _token_holder["t"]
+    _token_holder["t"] = get_token()
+    _token_holder["at"] = time.time()
+    return _token_holder["t"]
+
+
+def fetch_group_name(goid: str) -> str:
+    try:
+        req = urllib.request.Request(f"{API}/v2/groups/{goid}/info", headers={"Authorization": f"QQBot {_api_token()}"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return (json.loads(r.read().decode()) or {}).get("group_name") or ""
+    except Exception as e:
+        log(f"group info failed {goid[:8]}: {e}")
+        return ""
+
+
+def group_cfg(goid: str, extra: dict | None = None) -> dict | None:
+    """Load (or auto-create from _default) the group's config."""
+    if not goid:
+        return None
+    cfg = G.load_config(goid)
+    if cfg is None:
+        name = fetch_group_name(goid)
+        cfg, created = G.ensure_group(goid, name, extra)
+        if created:
+            log(f"NEW GROUP auto-created {goid} name={cfg.get('name')!r} (at_reply only)")
+    return cfg
+
+
+def group_fields(cfg: dict | None, goid: str) -> dict:
+    return {
+        "group_id": group_qq_id(cfg, goid),
+        "group_openid": goid,
+        "group_name": (cfg or {}).get("name") or "",
+        "group_alias": ((cfg or {}).get("aliases") or [""])[0],
+        "group_dir": str(G.group_dir(goid)) if goid else "",
+        "group_enabled": bool((cfg or {}).get("enabled", True)),
+        "features": (cfg or {}).get("features") or {},
+    }
+
+
+def save_group_event(goid: str, ev: dict) -> None:
+    try:
+        gd = G.group_dir(goid) if goid else G.SYSTEM_DIR
+        gd.mkdir(parents=True, exist_ok=True)
+        with (gd / "last-events.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def to_payload(outer: dict, bot_openid: str, our_group: str) -> dict | None:
+    t = outer.get("t") or ""
+    if t not in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
+        return None
+    d = outer.get("d") or {}
+    if not isinstance(d, dict):
+        return None
+    goid = d.get("group_openid") or d.get("group_id") or ""
+    cfg = group_cfg(goid)
+    author = d.get("author") or {}
+    is_bot = author.get("bot") is True  # forward other bots too (from_bot=true); our own is skipped below
+    # skip our own openid if present
+    aoid = author.get("member_openid") or author.get("id") or ""
+    if bot_openid and aoid == bot_openid:
+        return None
+    content = d.get("content") or ""
+    text = strip_at(content)
+    mid = d.get("id") or ""
+    at_me = is_at_me(d, bot_openid, t)
+    uid = member_user_id(aoid)
+    ex = enrich(d, text, goid)
+    text = ex["raw_message"]
+    ref_cache_put(ex["ref_idx"], author.get("username") or "", text, goid)
+    segs = [{"type": "text", "data": {"text": text}}]
+    for a in ex["attachments"]:
+        if a.get("kind") == "image" and a.get("url"):
+            segs.append({"type": "image", "data": {"url": a["url"], "file": a.get("filename") or ""}})
+    return {
+        "post_type": "message",
+        "message_type": "group",
+        "user_id": uid,
+        "message_id": mid,
+        "raw_message": text,
+        "message": segs,
+        "text_only": ex["text"],
+        "attachments": ex["attachments"],
+        "quoted": ex["quoted"],
+        "card": ex["card"],
+        "ref_idx": ex["ref_idx"],
+        "content_type": ex["content_type"],
+        "member_role": author.get("member_role") or "",
+        "sender": {
+            "nickname": author.get("username") or "",
+            "user_id": uid,
+        },
+        "official": True,
+        "bot": BOT_NAME,
+        "bot_uin": BOT_UIN,
+        "group_openid": goid,
+        "member_openid": aoid,
+        "msg_id": mid,
+        "event_id": outer.get("id") or "",
+        "at_me": at_me,
+        "from_bot": is_bot,
+        "time": int(time.time()),
+        "self_id": BOT_UIN,
+        **group_fields(cfg, goid),
+    }
+
+
+NOTICE_EVENTS = {
+    "GROUP_MEMBER_ADD": "member_join",
+    "GROUP_MEMBER_REMOVE": "member_leave",
+    "GROUP_ADD_ROBOT": "bot_added",
+    "GROUP_DEL_ROBOT": "bot_removed",
+    "GROUP_MSG_REJECT": "proactive_off",
+    "GROUP_MSG_RECEIVE": "proactive_on",
+}
+
+
+def _base(outer: dict, goid: str, cfg: dict | None = None) -> dict:
+    b = {
+        "official": True,
+        "bot": BOT_NAME,
+        "bot_uin": BOT_UIN,
+        "event_id": outer.get("id") or "",
+        "time": int(time.time()),
+        "self_id": BOT_UIN,
+    }
+    if goid:
+        b.update(group_fields(cfg, goid))
+    return b
+
+
+def notice_payload(outer: dict, our_group: str) -> dict | None:
+    t = outer.get("t") or ""
+    d = outer.get("d") or {}
+    goid = d.get("group_openid") or ""
+    extra = {"added_by": d.get("op_member_openid")} if t == "GROUP_ADD_ROBOT" and d.get("op_member_openid") else None
+    cfg = group_cfg(goid, extra)
+    mo = d.get("member_openid") or d.get("op_member_openid") or ""
+    p = _base(outer, goid, cfg)
+    p.update({
+        "post_type": "notice",
+        "notice_type": NOTICE_EVENTS[t],
+        "event": t,
+        "member_openid": mo,
+        "user_id": member_user_id(mo),
+        "at_tag": f'<qqbot-at-user id="{mo}" />' if mo else "",
+        "raw": d,
+    })
+    return p
+
+
+def interaction_ack(token: str, iid: str, code: int = 0) -> str:
+    try:
+        req = urllib.request.Request(
+            f"{API}/interactions/{iid}",
+            data=json.dumps({"code": code}).encode(),
+            method="PUT",
+            headers={"Content-Type": "application/json", "Authorization": f"QQBot {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return str(r.status)
+    except urllib.error.HTTPError as e:
+        return f"{e.code} {e.read().decode()[:200]}"
+    except Exception as e:
+        return f"err {e}"
+
+
+def interaction_payload(outer: dict, our_group: str) -> dict | None:
+    d = outer.get("d") or {}
+    goid = d.get("group_openid") or ""
+    cfg = group_cfg(goid) if goid else None
+    res = ((d.get("data") or {}).get("resolved")) or {}
+    mo = d.get("group_member_openid") or d.get("user_openid") or ""
+    p = _base(outer, goid, cfg)
+    p.update({
+        "post_type": "interaction",
+        "interaction_type": d.get("type"),
+        "scene": d.get("scene") or "",
+        "member_openid": mo,
+        "user_id": member_user_id(mo),
+        "at_tag": f'<qqbot-at-user id="{mo}" />' if mo and d.get("scene") == "group" else "",
+        "button_id": res.get("button_id") or "",
+        "button_data": res.get("button_data") or "",
+        "raw_message": f"[按钮点击: {res.get('button_data') or res.get('button_id') or ''}]",
+        "raw": d,
+    })
+    return p
+
+
+def c2c_payload(outer: dict) -> dict:
+    d = outer.get("d") or {}
+    author = d.get("author") or {}
+    uo = author.get("user_openid") or author.get("id") or ""
+    ex = enrich(d, strip_at(d.get("content") or ""))
+    p = _base(outer, "")
+    p.update({
+        "post_type": "message",
+        "message_type": "private",
+        "c2c_dir": str(G.C2C_DIR),
+        "group_openid": "",
+        "user_openid": uo,
+        "user_id": member_user_id(uo),
+        "message_id": d.get("id") or "",
+        "msg_id": d.get("id") or "",
+        "raw_message": ex["raw_message"],
+        "text_only": ex["text"],
+        "message": [{"type": "text", "data": {"text": ex["raw_message"]}}],
+        "attachments": ex["attachments"],
+        "quoted": ex["quoted"],
+        "card": ex["card"],
+        "ref_idx": ex["ref_idx"],
+        "sender": {"nickname": author.get("username") or "", "user_id": member_user_id(uo)},
+        "at_me": True,
+        "from_bot": False,
+    })
+    return p
+
+
+def should_forward(p: dict) -> tuple[bool, str]:
+    """Per-group feature gating. Returns (forward?, reason)."""
+    if not p.get("group_openid"):
+        return True, "c2c"
+    if not p.get("group_enabled", True):
+        return False, "group disabled"
+    f = p.get("features") or {}
+    pt = p.get("post_type")
+    if pt == "message":
+        if p.get("at_me"):
+            ok = bool(f.get("at_reply", True))
+            return ok, "" if ok else "at_reply off"
+        ok = bool(f.get("natural_reply", False))
+        return ok, "" if ok else "natural_reply off (logged for context only)"
+    if pt == "notice":
+        nt = p.get("notice_type")
+        if nt in ("member_join", "member_leave"):
+            ok = bool(f.get("welcome", False))
+            return ok, "" if ok else "welcome off"
+        return True, ""
+    if pt == "interaction":
+        ok = bool(f.get("buttons", False))
+        return ok, "" if ok else "buttons off"
+    return True, ""
+
+
+def forward(payload: dict) -> None:
+    ok, why = should_forward(payload)
+    if not ok:
+        log(f"gated {payload.get('post_type')} group={payload.get('group_name') or payload.get('group_openid','')[:8]}: {why}")
+        return
+    try:
+        if payload.get("group_openid"):
+            (G.group_dir(payload["group_openid"]) / "last-forward.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    url = rd(FORWARDER / "url") or rd(Path("/workspace/qq-bot-persist/forwarder-url"))
+    key = rd(FORWARDER / "key") or rd(Path("/workspace/qq-bot-persist/forwarder-key"))
+    if not url.startswith("http") or not key or key.startswith("PLACEHOLDER"):
+        log("skip forward: url/key missing")
+        return
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    mid = payload.get("message_id")
+    try:
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + key,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            log(f"forwarded {payload.get('post_type')} mid={mid or payload.get('event_id')} at_me={payload.get('at_me')} -> {r.status}")
+    except Exception as e:
+        log(f"forward error mid={mid}: {e}")
+
+
+class Bridge:
+    def __init__(self) -> None:
+        self.seq = None
+        self.heartbeat_ms = 41250
+        self.ws = None
+        self._hb_stop = threading.Event()
+        self.session_id = None
+        self.bot_openid = rd(DIR / "bot_openid.txt")
+        self.our_group = rd(DIR / "group_openid.txt")
+        self.token = ""
+        self.token_at = 0.0
+        self.last_ack = time.time()
+
+    def ensure_token(self) -> str:
+        if self.token and (time.time() - self.token_at) < 6000:
+            return self.token
+        self.token = get_token()
+        self.token_at = time.time()
+        return self.token
+
+    def _heartbeat_loop(self) -> None:
+        while not self._hb_stop.wait(self.heartbeat_ms / 1000.0):
+            try:
+                if self.ws and time.time() - self.last_ack > self.heartbeat_ms / 1000.0 * 2.5:
+                    log(f"no heartbeat ACK for {int(time.time() - self.last_ack)}s, forcing reconnect")
+                    try:
+                        self.ws.close()
+                    except Exception:
+                        pass
+                    try:
+                        if self.ws.sock:
+                            self.ws.sock.shutdown()
+                    except Exception:
+                        pass
+                    break
+                if self.ws:
+                    self.ws.send(json.dumps({"op": 1, "d": self.seq}))
+                    log(f"heartbeat seq={self.seq}")
+            except Exception as e:
+                log(f"heartbeat error: {e}")
+                break
+
+    def on_message(self, ws, message: str) -> None:
+        try:
+            ev = json.loads(message)
+        except Exception:
+            return
+        op = ev.get("op")
+        self.last_ack = time.time()
+        if "s" in ev and ev["s"] is not None:
+            self.seq = ev["s"]
+        if op == 10:  # Hello
+            hi = (ev.get("d") or {}).get("heartbeat_interval") or 41250
+            self.heartbeat_ms = int(hi)
+            log(f"HELLO heartbeat_ms={self.heartbeat_ms}")
+            identify = {
+                "op": 2,
+                "d": {
+                    "token": f"QQBot {self.token}",
+                    "intents": INTENTS,
+                    "shard": [0, 1],
+                },
+            }
+            ws.send(json.dumps(identify))
+            log(f"IDENTIFY intents={INTENTS}")
+            return
+        if op == 11:
+            return
+        if op == 0:
+            t = ev.get("t") or ""
+            if t == "READY":
+                d = ev.get("d") or {}
+                self.session_id = d.get("session_id")
+                user = d.get("user") or {}
+                uid = user.get("id") or ""
+                if uid and not self.bot_openid:
+                    # READY user.id is not always the same as mention openid; keep file if set
+                    pass
+                log(f"READY session={self.session_id} user={user.get('username')} id={uid}")
+                save_group_event("", ev)  # _system/last-events.jsonl
+                return
+            if t == "RESUMED":
+                log("RESUMED")
+                return
+            if t in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
+                d = ev.get("d") or {}
+                save_group_event(d.get("group_openid") or d.get("group_id") or "", ev)
+                # learn bot openid from mentions.is_you
+                for m in d.get("mentions") or []:
+                    if isinstance(m, dict) and m.get("is_you") and m.get("id"):
+                        if m["id"] != self.bot_openid:
+                            self.bot_openid = m["id"]
+                            try:
+                                (DIR / "bot_openid.txt").write_text(self.bot_openid + "\n")
+                            except Exception:
+                                pass
+                        break
+                payload = to_payload(ev, self.bot_openid, self.our_group)
+                if payload:
+                    log(
+                        f"recv {t} [{payload.get('group_alias') or payload.get('group_name') or payload['group_openid'][:8]}] "
+                        f"from={payload.get('sender', {}).get('nickname')} "
+                        f"at_me={payload['at_me']} text={payload['raw_message'][:80]!r}"
+                    )
+                    forward(payload)
+                else:
+                    goid = (d.get("group_openid") or d.get("group_id") or "")[:16]
+                    log(f"skip {t} group={goid}...")
+                return
+            if t == "INTERACTION_CREATE":
+                d = ev.get("d") or {}
+                iid = d.get("id") or ev.get("id") or ""
+                try:
+                    ack = interaction_ack(self.ensure_token(), iid) if iid else "no-id"
+                except Exception as e:
+                    ack = f"err {e}"
+                log(f"INTERACTION type={d.get('type')} ack={ack} data={json.dumps(d.get('data'), ensure_ascii=False)[:200]}")
+                self._save_event(ev)
+                p = interaction_payload(ev, self.our_group)
+                if p:
+                    forward(p)
+                return
+            if t in NOTICE_EVENTS:
+                log(f"notice {t} raw={json.dumps(ev.get('d'), ensure_ascii=False)[:200]}")
+                self._save_event(ev)
+                p = notice_payload(ev, self.our_group)
+                if p:
+                    forward(p)
+                return
+            if t == "C2C_MESSAGE_CREATE":
+                self._save_event(ev)
+                p = c2c_payload(ev)
+                log(f"recv C2C from={p['sender']['nickname']} text={p['raw_message'][:80]!r}")
+                forward(p)
+                return
+            log(f"event {t} raw={json.dumps(ev, ensure_ascii=False)[:300]}")
+            return
+        if op == 7:  # reconnect
+            log("op7 reconnect requested")
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return
+        if op == 9:
+            log(f"INVALID SESSION: {ev}")
+            return
+        log(f"op={op} raw={str(ev)[:200]}")
+
+    def _save_event(self, ev: dict) -> None:
+        d = ev.get("d") or {}
+        goid = d.get("group_openid") if isinstance(d, dict) else ""
+        if goid:
+            save_group_event(goid, ev)
+            return
+        try:
+            G.C2C_DIR.mkdir(parents=True, exist_ok=True)
+            with (G.C2C_DIR / "last-events.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def on_error(self, ws, err) -> None:
+        log(f"ws error: {err}")
+
+    def on_close(self, ws, *a) -> None:
+        log(f"ws closed args={a}")
+        self._hb_stop.set()
+
+    def on_open(self, ws) -> None:
+        log("ws open")
+        self._hb_stop.clear()
+        self.last_ack = time.time()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+
+    def run_forever(self) -> None:
+        try:
+            import websocket
+        except ImportError:
+            import subprocess, sys
+
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "websocket-client"])
+            import websocket
+
+        while True:
+            try:
+                self.seq = None
+                self._hb_stop.set()
+                time.sleep(0.2)
+                self._hb_stop.clear()
+                token = self.ensure_token()
+                gw = get_gateway(token)
+                log(f"connecting {gw}")
+                self.ws = websocket.WebSocketApp(
+                    gw,
+                    on_open=self.on_open,
+                    on_message=self.on_message,
+                    on_error=self.on_error,
+                    on_close=self.on_close,
+                )
+                self.ws.run_forever(ping_interval=0)
+            except Exception as e:
+                log(f"loop error: {e}")
+            log("reconnect in 5s")
+            time.sleep(5)
+
+
+def main() -> None:
+    log("official-ws-bridge starting")
+    log(f"group_openid={rd(DIR / 'group_openid.txt')} bot_openid={rd(DIR / 'bot_openid.txt')}")
+    Bridge().run_forever()
+
+
+if __name__ == "__main__":
+    main()
