@@ -87,3 +87,10 @@ python3 kb.py --group zwift add-doc /path/to/file.pdf
 1. 把 official-ws-bridge.py、send_group.py 恢复成 .bak-1405。
 2. 删掉 last-events.jsonl、sent-log.jsonl、.send.lock 三个软链，把 groups/9F23…/ 里对应的文件移回原位置。
 3. `sudo cp official-ws-bridge.py /root/forwarder/ && pkill -f 'official-bot/official-ws-bridge.py'`
+
+## 群人设 prompt.md
+- 位置：groups/<group_openid>/prompt.md。webhook 例程每次回复前先读，优先级高于 config.style 和默认风格，但突破不了安全规则（防重复、不泄密、不串群、功能开关）。
+- 结构建议：你是谁 / 群主题 / 说话方式 / 群梗与玩法 / 推送口味（daily_ai_news、x_info_push 读这一节）/ 禁忌。
+- config.style 只写一句「详见 prompt.md」，避免两处重复。群里有谁、链接、ID 等事实放 notes.md。
+- 新群自动复制 groups/_default/prompt.md。人设只由机器人主人决定，机器人自己不改。
+- 群人设含群内信息，被 .gitignore 忽略，只有 _default/prompt.md 进仓库。
