@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import queue
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -591,18 +594,41 @@ def forward(payload: dict) -> None:
 
 
 class Bridge:
+    """Gateway session with RESUME + fast dead-connection detection.
+
+    Threads per connection (each bound to its own stop Event, so stale threads can't
+    touch a newer socket):
+      * heartbeat: sends op1 every heartbeat_interval (send has a socket timeout).
+      * watchdog: independent of the heartbeat thread; if no op11 ACK for
+        DEAD_AFTER seconds it shuts the raw socket down (unblocks a hung send/recv).
+    Dispatch events are handed to one worker thread (keeps order) so slow webhook
+    POSTs never delay reading ACKs.
+    """
+
+    SOCK_TIMEOUT = 15          # seconds; bounds ws.send / partial reads
+    ACK_LOG_EVERY = 10         # log 'ack ok' every N acks (~7 min) + first ack per connection
+
     def __init__(self) -> None:
-        self.seq = None
+        self.seq = None            # last dispatch seq (op0 "s"); kept across reconnects for RESUME
+        self.session_id = None
         self.heartbeat_ms = 41250
         self.ws = None
-        self._hb_stop = threading.Event()
-        self.session_id = None
+        self._stop = threading.Event()
         self.bot_openid = rd(DIR / "bot_openid.txt")
         self.our_group = rd(DIR / "group_openid.txt")
         self.token = ""
         self.token_at = 0.0
         self.last_ack = time.time()
+        self.last_hb_sent = 0.0
+        self.ack_count = 0
+        self.resuming = False      # sent op6, waiting for RESUMED
+        self.resume_failures = 0
+        self.force_identify = False
+        self.close_code = None
+        self.q: "queue.Queue[dict]" = queue.Queue()
+        threading.Thread(target=self._worker, daemon=True, name="dispatch").start()
 
+    # ---------- helpers ----------
     def ensure_token(self) -> str:
         if self.token and (time.time() - self.token_at) < 6000:
             return self.token
@@ -610,27 +636,73 @@ class Bridge:
         self.token_at = time.time()
         return self.token
 
-    def _heartbeat_loop(self) -> None:
-        while not self._hb_stop.wait(self.heartbeat_ms / 1000.0):
+    def dead_after(self) -> float:
+        return max(60.0, self.heartbeat_ms / 1000.0 * 1.5)
+
+    def _send(self, ws, obj: dict) -> None:
+        ws.send(json.dumps(obj))
+
+    def _kill_socket(self, ws, why: str) -> None:
+        """Force the run_forever loop to return even if a send/recv is hung."""
+        log(f"forcing reconnect: {why}")
+        try:
+            ws.keep_running = False
+        except Exception:
+            pass
+        try:
+            raw = ws.sock.sock if ws.sock else None
+            if raw:
+                raw.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            if ws.sock and ws.sock.sock:
+                ws.sock.sock.close()
+        except Exception:
+            pass
+
+    def _clear_session(self, why: str) -> None:
+        if self.session_id or self.seq is not None:
+            log(f"session cleared ({why}); next connect will IDENTIFY")
+        self.session_id = None
+        self.seq = None
+        self.resuming = False
+        self.resume_failures = 0
+
+    # ---------- per-connection threads ----------
+    def _heartbeat_loop(self, ws, stop: threading.Event) -> None:
+        while not stop.wait(self.heartbeat_ms / 1000.0):
             try:
-                if self.ws and time.time() - self.last_ack > self.heartbeat_ms / 1000.0 * 2.5:
-                    log(f"no heartbeat ACK for {int(time.time() - self.last_ack)}s, forcing reconnect")
-                    try:
-                        self.ws.close()
-                    except Exception:
-                        pass
-                    try:
-                        if self.ws.sock:
-                            self.ws.sock.shutdown()
-                    except Exception:
-                        pass
-                    break
-                if self.ws:
-                    self.ws.send(json.dumps({"op": 1, "d": self.seq}))
-                    log(f"heartbeat seq={self.seq}")
+                self.last_hb_sent = time.time()
+                self._send(ws, {"op": 1, "d": self.seq})
+                log(f"heartbeat seq={self.seq}")
             except Exception as e:
-                log(f"heartbeat error: {e}")
-                break
+                log(f"heartbeat send error: {e!r}")
+                if not stop.is_set():
+                    self._kill_socket(ws, "heartbeat send failed")
+                return
+
+    def _watchdog_loop(self, ws, stop: threading.Event) -> None:
+        killed_at = 0.0
+        while not stop.wait(5):
+            now = time.time()
+            if killed_at:
+                if now - killed_at > 45:
+                    log("run_forever did not return 45s after socket kill; exiting for run-script restart")
+                    os._exit(3)
+                continue
+            gap = now - self.last_ack
+            if gap > self.dead_after():
+                hb = int(now - self.last_hb_sent) if self.last_hb_sent else -1
+                self._kill_socket(ws, f"no heartbeat ACK for {int(gap)}s (last hb send {hb}s ago)")
+                killed_at = now
+
+    # ---------- websocket callbacks ----------
+    def on_open(self, ws) -> None:
+        log("ws open")
+        self.last_ack = time.time()
+        self.ack_count = 0
+        threading.Thread(target=self._watchdog_loop, args=(ws, self._stop), daemon=True, name="watchdog").start()
 
     def on_message(self, ws, message: str) -> None:
         try:
@@ -638,106 +710,140 @@ class Bridge:
         except Exception:
             return
         op = ev.get("op")
-        self.last_ack = time.time()
-        if "s" in ev and ev["s"] is not None:
+        if op == 11:  # heartbeat ACK
+            now = time.time()
+            self.last_ack = now
+            self.ack_count += 1
+            if self.ack_count == 1 or self.ack_count % self.ACK_LOG_EVERY == 0:
+                rtt = int((now - self.last_hb_sent) * 1000) if self.last_hb_sent else -1
+                log(f"ack ok n={self.ack_count} seq={self.seq} rtt={rtt}ms")
+            return
+        if op == 0 and ev.get("s") is not None:
             self.seq = ev["s"]
         if op == 10:  # Hello
+            self.last_ack = time.time()
             hi = (ev.get("d") or {}).get("heartbeat_interval") or 41250
             self.heartbeat_ms = int(hi)
-            log(f"HELLO heartbeat_ms={self.heartbeat_ms}")
-            identify = {
-                "op": 2,
-                "d": {
+            log(f"HELLO heartbeat_ms={self.heartbeat_ms} dead_after={int(self.dead_after())}s")
+            if self.session_id and self.seq is not None and not self.force_identify:
+                self._send(ws, {"op": 6, "d": {
+                    "token": f"QQBot {self.token}",
+                    "session_id": self.session_id,
+                    "seq": self.seq,
+                }})
+                self.resuming = True
+                log(f"RESUME session={self.session_id} seq={self.seq}")
+            else:
+                self.force_identify = False
+                self._send(ws, {"op": 2, "d": {
                     "token": f"QQBot {self.token}",
                     "intents": INTENTS,
                     "shard": [0, 1],
-                },
-            }
-            ws.send(json.dumps(identify))
-            log(f"IDENTIFY intents={INTENTS}")
-            return
-        if op == 11:
+                }})
+                log(f"IDENTIFY intents={INTENTS}")
+            threading.Thread(target=self._heartbeat_loop, args=(ws, self._stop), daemon=True, name="heartbeat").start()
             return
         if op == 0:
             t = ev.get("t") or ""
             if t == "READY":
                 d = ev.get("d") or {}
                 self.session_id = d.get("session_id")
+                self.resuming = False
+                self.resume_failures = 0
                 user = d.get("user") or {}
-                uid = user.get("id") or ""
-                if uid and not self.bot_openid:
-                    # READY user.id is not always the same as mention openid; keep file if set
-                    pass
-                log(f"READY session={self.session_id} user={user.get('username')} id={uid}")
+                log(f"READY session={self.session_id} user={user.get('username')} id={user.get('id') or ''} seq={self.seq}")
                 save_group_event("", ev)  # _system/last-events.jsonl
                 return
             if t == "RESUMED":
-                log("RESUMED")
+                self.resuming = False
+                self.resume_failures = 0
+                log(f"RESUMED session={self.session_id} seq={self.seq}")
                 return
-            if t in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
-                d = ev.get("d") or {}
-                save_group_event(d.get("group_openid") or d.get("group_id") or "", ev)
-                # learn bot openid from mentions.is_you
-                for m in d.get("mentions") or []:
-                    if isinstance(m, dict) and m.get("is_you") and m.get("id"):
-                        if m["id"] != self.bot_openid:
-                            self.bot_openid = m["id"]
-                            try:
-                                (DIR / "bot_openid.txt").write_text(self.bot_openid + "\n")
-                            except Exception:
-                                pass
-                        break
-                payload = to_payload(ev, self.bot_openid, self.our_group)
-                if payload:
-                    log(
-                        f"recv {t} [{payload.get('group_alias') or payload.get('group_name') or payload['group_openid'][:8]}] "
-                        f"from={payload.get('sender', {}).get('nickname')} "
-                        f"at_me={payload['at_me']} text={payload['raw_message'][:80]!r}"
-                    )
-                    forward(payload)
-                else:
-                    goid = (d.get("group_openid") or d.get("group_id") or "")[:16]
-                    log(f"skip {t} group={goid}...")
-                return
-            if t == "INTERACTION_CREATE":
-                d = ev.get("d") or {}
-                iid = d.get("id") or ev.get("id") or ""
-                try:
-                    ack = interaction_ack(self.ensure_token(), iid) if iid else "no-id"
-                except Exception as e:
-                    ack = f"err {e}"
-                log(f"INTERACTION type={d.get('type')} ack={ack} data={json.dumps(d.get('data'), ensure_ascii=False)[:200]}")
-                self._save_event(ev)
-                p = interaction_payload(ev, self.our_group)
-                if p:
-                    forward(p)
-                return
-            if t in NOTICE_EVENTS:
-                log(f"notice {t} raw={json.dumps(ev.get('d'), ensure_ascii=False)[:200]}")
-                self._save_event(ev)
-                p = notice_payload(ev, self.our_group)
-                if p:
-                    forward(p)
-                return
-            if t == "C2C_MESSAGE_CREATE":
-                self._save_event(ev)
-                p = c2c_payload(ev)
-                log(f"recv C2C from={p['sender']['nickname']} text={p['raw_message'][:80]!r}")
-                forward(p)
-                return
-            log(f"event {t} raw={json.dumps(ev, ensure_ascii=False)[:300]}")
+            self.q.put(ev)
             return
-        if op == 7:  # reconnect
-            log("op7 reconnect requested")
-            try:
-                ws.close()
-            except Exception:
-                pass
+        if op == 7:  # server asks us to reconnect (e.g. 4009 session timed out) -> RESUME
+            log("op7 reconnect requested (will RESUME)")
+            self._kill_socket(ws, "op7")
             return
         if op == 9:
-            log(f"INVALID SESSION: {ev}")
+            log(f"INVALID SESSION d={ev.get('d')!r} (resuming={self.resuming})")
+            self._clear_session("op9 invalid session")
+            self.force_identify = True
+            self._kill_socket(ws, "op9")
             return
         log(f"op={op} raw={str(ev)[:200]}")
+
+    def on_error(self, ws, err) -> None:
+        log(f"ws error: {err!r}")
+
+    def on_close(self, ws, code=None, reason=None, *a) -> None:
+        log(f"ws closed code={code} reason={reason!r}")
+        self.close_code = code
+        self._stop.set()
+
+    # ---------- dispatch worker ----------
+    def _worker(self) -> None:
+        while True:
+            ev = self.q.get()
+            try:
+                self._dispatch(ev)
+            except Exception as e:
+                log(f"dispatch error t={ev.get('t')}: {e!r}")
+
+    def _dispatch(self, ev: dict) -> None:
+        t = ev.get("t") or ""
+        if t in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
+            d = ev.get("d") or {}
+            save_group_event(d.get("group_openid") or d.get("group_id") or "", ev)
+            # learn bot openid from mentions.is_you
+            for m in d.get("mentions") or []:
+                if isinstance(m, dict) and m.get("is_you") and m.get("id"):
+                    if m["id"] != self.bot_openid:
+                        self.bot_openid = m["id"]
+                        try:
+                            (DIR / "bot_openid.txt").write_text(self.bot_openid + "\n")
+                        except Exception:
+                            pass
+                    break
+            payload = to_payload(ev, self.bot_openid, self.our_group)
+            if payload:
+                log(
+                    f"recv {t} s={ev.get('s')} [{payload.get('group_alias') or payload.get('group_name') or payload['group_openid'][:8]}] "
+                    f"from={payload.get('sender', {}).get('nickname')} "
+                    f"at_me={payload['at_me']} text={payload['raw_message'][:80]!r}"
+                )
+                forward(payload)
+            else:
+                goid = (d.get("group_openid") or d.get("group_id") or "")[:16]
+                log(f"skip {t} group={goid}...")
+            return
+        if t == "INTERACTION_CREATE":
+            d = ev.get("d") or {}
+            iid = d.get("id") or ev.get("id") or ""
+            try:
+                ack = interaction_ack(self.ensure_token(), iid) if iid else "no-id"
+            except Exception as e:
+                ack = f"err {e}"
+            log(f"INTERACTION type={d.get('type')} ack={ack} data={json.dumps(d.get('data'), ensure_ascii=False)[:200]}")
+            self._save_event(ev)
+            p = interaction_payload(ev, self.our_group)
+            if p:
+                forward(p)
+            return
+        if t in NOTICE_EVENTS:
+            log(f"notice {t} raw={json.dumps(ev.get('d'), ensure_ascii=False)[:200]}")
+            self._save_event(ev)
+            p = notice_payload(ev, self.our_group)
+            if p:
+                forward(p)
+            return
+        if t == "C2C_MESSAGE_CREATE":
+            self._save_event(ev)
+            p = c2c_payload(ev)
+            log(f"recv C2C from={p['sender']['nickname']} text={p['raw_message'][:80]!r}")
+            forward(p)
+            return
+        log(f"event {t} raw={json.dumps(ev, ensure_ascii=False)[:300]}")
 
     def _save_event(self, ev: dict) -> None:
         d = ev.get("d") or {}
@@ -752,37 +858,32 @@ class Bridge:
         except Exception:
             pass
 
-    def on_error(self, ws, err) -> None:
-        log(f"ws error: {err}")
-
-    def on_close(self, ws, *a) -> None:
-        log(f"ws closed args={a}")
-        self._hb_stop.set()
-
-    def on_open(self, ws) -> None:
-        log("ws open")
-        self._hb_stop.clear()
-        self.last_ack = time.time()
-        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
-
+    # ---------- main loop ----------
     def run_forever(self) -> None:
         try:
             import websocket
         except ImportError:
-            import subprocess, sys
+            import subprocess
 
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "websocket-client"])
             import websocket
+        websocket.setdefaulttimeout(self.SOCK_TIMEOUT)
+        sockopt = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+        for name, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+            if hasattr(socket, name):
+                sockopt.append((socket.IPPROTO_TCP, getattr(socket, name), val))
+        if hasattr(socket, "TCP_USER_TIMEOUT"):  # unacked outgoing data -> error after 30s
+            sockopt.append((socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 30000))
 
         while True:
+            self._stop.set()           # stop threads of the previous connection
+            self._stop = threading.Event()
+            self.close_code = None
+            delay = 3
             try:
-                self.seq = None
-                self._hb_stop.set()
-                time.sleep(0.2)
-                self._hb_stop.clear()
                 token = self.ensure_token()
                 gw = get_gateway(token)
-                log(f"connecting {gw}")
+                log(f"connecting {gw} (session={'resume' if self.session_id and self.seq is not None and not self.force_identify else 'new'})")
                 self.ws = websocket.WebSocketApp(
                     gw,
                     on_open=self.on_open,
@@ -790,7 +891,7 @@ class Bridge:
                     on_error=self.on_error,
                     on_close=self.on_close,
                 )
-                self.ws.run_forever(ping_interval=0)
+                self.ws.run_forever(ping_interval=0, sockopt=tuple(sockopt), reconnect=0)
             except Exception as e:
                 log(f"loop error: {e}")
                 if "401" in str(e):
@@ -800,14 +901,40 @@ class Bridge:
                     _token_holder["t"] = ""
                     _token_holder["at"] = 0.0
                     log("401 -> cleared cached token")
-            log("reconnect in 5s")
-            time.sleep(5)
+            self._stop.set()
+            code = self.close_code
+            if self.resuming:
+                # socket closed before RESUMED arrived
+                self.resuming = False
+                self.resume_failures += 1
+                log(f"RESUME failed (#{self.resume_failures}, close code={code})")
+                if self.resume_failures >= 2:
+                    self._clear_session("resume failed twice")
+            if code in (4006, 4007):  # invalid session / invalid seq -> cannot resume
+                self._clear_session(f"close code {code}")
+            elif code in (4914, 4915):  # bot offline / banned (sandbox / punished)
+                log(f"close code {code}: bot offline/banned; slow retry")
+                delay = 60
+            elif code == 4008:  # rate limited
+                delay = 15
+            elif code == 4009:  # session timed out (QQ does this ~hourly) -> RESUME right away
+                delay = 1
+            log(f"reconnect in {delay}s")
+            time.sleep(delay)
 
 
 def main() -> None:
     log("official-ws-bridge starting")
     log(f"group_openid={rd(DIR / 'group_openid.txt')} bot_openid={rd(DIR / 'bot_openid.txt')}")
-    Bridge().run_forever()
+    br = Bridge()
+    try:
+        import signal
+
+        # kill -USR1 <pid>: drop the socket but keep the session -> reconnect + RESUME (test / external watchdog)
+        signal.signal(signal.SIGUSR1, lambda *_: br.ws and br._kill_socket(br.ws, "SIGUSR1"))
+    except Exception:
+        pass
+    br.run_forever()
 
 
 if __name__ == "__main__":
