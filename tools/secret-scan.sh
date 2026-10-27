@@ -23,7 +23,7 @@ report() { echo "secret-scan: $1"; fail=1; }
 # 1) forbidden paths
 for f in "${FILES[@]}"; do
   case "$f" in
-    */appid|*/appsecret|*forwarder-url|*forwarder-key|*/url|*/key|github/*|*password*|*.bak*|*.log|*.jsonl|*.lock|*ref-cache*|*last-forward*|*/c2c/*|*/_system/*|*/notes.md|*/knowledge/*|*/media/*|*bot_openid*|*group_openid.txt|*bot_uin*|*box-public-ip*|*onebot11_*|*Napcat*|*.tar.gz|*.env)
+    */appid|*/appsecret|*forwarder-url|*forwarder-key|*/url|*/key|github/*|*password*|*.bak*|*.log|*.jsonl|*.lock|*ref-cache*|*last-forward*|*local-watchdog-state*|*/c2c/*|*/_system/*|*/notes.md|*/knowledge/*|*/media/*|*bot_openid*|*group_openid.txt|*bot_uin*|*box-public-ip*|*onebot11_*|*Napcat*|*.tar.gz|*.env)
       report "forbidden path staged: $f" ;;
     official-bot/groups/*/config.json)
       [ "$f" = "official-bot/groups/_default/config.json" ] || report "real group config staged: $f" ;;

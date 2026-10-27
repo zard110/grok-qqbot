@@ -41,13 +41,21 @@ fi
 # NapCat retired 2026-10-19 (only official MaxShenBi kept): pgrep -f /root/napcat-run.sh >/dev/null || setsid nohup /root/napcat-run.sh >/dev/null 2>&1 < /dev/null &
 # NapCat retired 2026-10-19 (only official MaxShenBi kept): pgrep -f /root/qq-healer.sh >/dev/null || setsid nohup /root/qq-healer.sh >/dev/null 2>&1 < /dev/null &
 if [ -d /root/forwarder ]; then
+  :
 # NapCat retired 2026-10-19 (only official MaxShenBi kept): pgrep -f /root/forwarder/run.sh >/dev/null || setsid nohup /root/forwarder/run.sh >/dev/null 2>&1 < /dev/null &
   # NapCat ws-bridge: KEEP OFF while official MaxShenBi bridge is primary (avoids double replies).
   # To re-enable NapCat forward: start bash /root/forwarder/run-ws.sh and stop official-ws.
   # pgrep -f /root/forwarder/ws-bridge.py >/dev/null || setsid nohup bash /root/forwarder/run-ws.sh >/dev/null 2>&1 < /dev/null &
 fi
+# Ensure python websocket-client is installed (lost after container reset)
+python3 -c "import websocket" >/dev/null 2>&1 || sudo python3 -m pip install --break-system-packages websocket-client >/dev/null 2>&1
 # Official QQ bot gateway bridge (does NOT require NapCat)
 if [ -f /workspace/qq-bot-persist/official-bot/run-official-ws.sh ]; then
   pgrep -f official-ws-bridge.py >/dev/null || setsid nohup bash /workspace/qq-bot-persist/official-bot/run-official-ws.sh >/dev/null 2>&1 < /dev/null &
 fi
+# Local zero-token watchdog (checks every 120s, alerts via webhook only on unrecoverable failure)
+if [ -f /workspace/qq-bot-persist/official-bot/run-local-watchdog.sh ]; then
+  pgrep -f local-watchdog.py >/dev/null || setsid nohup bash /workspace/qq-bot-persist/official-bot/run-local-watchdog.sh >/dev/null 2>&1 < /dev/null &
+fi
 exit 0
+

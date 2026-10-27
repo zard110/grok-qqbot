@@ -185,7 +185,7 @@ def _face_sub(m: "re.Match") -> str:
     return f"[表情{(':' + txt) if txt else ''}]"
 
 
-def _att_list(atts) -> tuple[list, list]:
+def _att_list(atts, goid: str = "", is_face_msg: bool = False) -> tuple[list, list]:
     """normalize attachments -> (list of dicts, placeholder strings)"""
     out, ph = [], []
     for a in atts or []:
@@ -198,8 +198,47 @@ def _att_list(atts) -> tuple[list, list]:
             url = "https:" + url
             item["url"] = url
         if ct.startswith("image"):
-            item["kind"] = "image"
-            ph.append(f"[图片: {url}]" if url else "[图片]")
+            w = int(a.get("width") or 0)
+            h = int(a.get("height") or 0)
+            sz = int(a.get("size") or 0)
+            fn = a.get("filename") or ""
+            is_sticker = is_face_msg or (0 < w <= 500 and 0 < h <= 500 and 0 < sz <= 500000) or (0 < w <= 1100 and 0 < h <= 1100 and 0 < sz <= 1050000 and 0.72 <= (w / max(h, 1)) <= 1.38)
+            local_p = ""
+            if is_sticker and url and fn:
+                try:
+                    sdir = (G.group_dir(goid) if goid else G.C2C_DIR) / "stickers"
+                    sdir.mkdir(parents=True, exist_ok=True)
+                    dest = sdir / fn
+                    if not dest.exists():
+                        with urllib.request.urlopen(url, timeout=4) as r:
+                            dest.write_bytes(r.read())
+                    if dest.exists():
+                        local_p = str(dest)
+                except Exception as e:
+                    log(f"sticker cache skip {fn}: {e}")
+            if is_sticker:
+                item["kind"] = "sticker"
+                if local_p:
+                    item["local_path"] = local_p
+                    in_idx = False
+                    try:
+                        idx_p = Path(local_p).parent / "index.json"
+                        if idx_p.exists():
+                            idx_obj = json.loads(idx_p.read_text("utf-8"))
+                            known_files = {Path(str(x.get("file", ""))).name for x in idx_obj.get("ready_stickers", [])}
+                            in_idx = (Path(local_p).name in known_files)
+                    except Exception:
+                        pass
+                    item["in_index"] = in_idx
+                    if in_idx:
+                        ph.append(f"[自定义表情包(已在库中): {local_p}]")
+                    else:
+                        ph.append(f"[自定义表情包(新图未入库，请Read看图后顺手运行 python3 make_sticker.py --add-sticker {Path(local_p).name} --text '图上文字与画面描述' --category panda --tags '标签1,标签2' 收纳入库): {local_p}]")
+                else:
+                    ph.append(f"[自定义表情包: {url}]" if url else "[自定义表情包]")
+            else:
+                item["kind"] = "image"
+                ph.append(f"[图片: {url}]" if url else "[图片]")
         elif ct == "voice" or ct.startswith("audio"):
             item["kind"] = "voice"
             asr = a.get("asr_refer_text") or ""
@@ -255,8 +294,9 @@ def _elements_text(els, depth: int = 0) -> list[str]:
 
 def enrich(d: dict, text: str, goid: str = "") -> dict:
     """Extract non-text info. Returns dict with attachments/quoted/card/raw_message/ref_idx."""
+    is_face_msg = "<faceType=" in (text or "")
     text = FACE_RE.sub(_face_sub, text or "").strip()
-    atts, ph = _att_list(d.get("attachments"))
+    atts, ph = _att_list(d.get("attachments"), goid=goid, is_face_msg=is_face_msg)
     card, cardph = _ark_info(d.get("ark_data"))
     ext = _ext_map(d)
     quoted = None

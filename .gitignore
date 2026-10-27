@@ -23,6 +23,9 @@
 !/official-bot/send_group.py
 !/official-bot/groups.py
 !/official-bot/kb.py
+!/official-bot/make_sticker.py
+!/official-bot/local-watchdog.py
+!/official-bot/run-local-watchdog.sh
 !/official-bot/run-official-ws.sh
 !/official-bot/intents.txt
 !/official-bot/tests/intent_probe.py
