@@ -41,7 +41,7 @@ for c in official-bot/groups/*/config.json; do
   while read -r v; do [ "${#v}" -ge 6 ] && LIT+=("$v"); done < <(grep -oE '[0-9A-F]{32}|\b[0-9]{6,12}\b' "$c" | sort -u)
 done
 
-URL_ALLOW='^[0-9]+:https?://(\.\.\.$|github\.com/$|bot\.q\.qq\.com|api\.sgroup\.qq\.com|api\.bot\.qq\.com|bots\.qq\.com|qq-ai\.cdn-go\.cn|github\.com/(x/y|<owner>)|example\.com|www\.qq\.com|qun\.qq\.com)'
+URL_ALLOW='^[0-9]+:https?://(\.\.\.$|github\.com/$|q\.qq\.com|bot\.q\.qq\.com|api\.sgroup\.qq\.com|api\.bot\.qq\.com|bots\.qq\.com|qq-ai\.cdn-go\.cn|github\.com/(x/y|<owner>|zard110/maxshenbi-qqbot)|example\.com|www\.qq\.com|qun\.qq\.com)'
 for f in "${FILES[@]}"; do
   content="$(show "$f" 2>/dev/null)" || continue
   for v in "${LIT[@]}"; do

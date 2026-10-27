@@ -1,24 +1,49 @@
-# 本地密钥 / 身份文件（不进 git）
+# 本地密钥与身份文件恢复清单（不进 Git）
 
-clone 之后，在本机按下面的清单手动放好这些文件（权限 600）。它们都被 `.gitignore` 排除了，**不要提交**。
+克隆本仓库到 `/workspace/qq-bot-persist` 后，请按下方表格在本机创建并填写这些密钥与身份文件（建议权限设为 `600`）。这些路径均已被 `.gitignore` 严格排除，且受 `tools/secret-scan.sh` 保护，**切勿强行提交到 Git 仓库**。
 
-| 路径（相对仓库根） | 内容 | 示例 |
+## 一、文件清单
+
+| 路径（相对于仓库根目录） | 用途说明 | 内容格式示例 |
 |---|---|---|
-| `official-bot/appid` | QQ 开放平台机器人 AppID | `<APPID>` |
-| `official-bot/appsecret` | AppSecret（机器人密钥） | `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `official-bot/bot_uin.txt` | 机器人 QQ 号（payload 里的 bot_uin/self_id） | `<BOT_QQ>` |
-| `official-bot/bot_name.txt` | （可选）机器人昵称，默认 MaxShenBi | `MaxShenBi` |
-| `official-bot/bot_openid.txt` | 机器人在群里的 openid（bridge 也会从 @ 消息里自动学到） | 32 位十六进制 |
-| `official-bot/group_openid.txt` | 默认群的 group_openid（send_group.py 不带 --group 时发往这个群） | 32 位十六进制 |
-| `official-bot/intents.txt` | 已提交（117440512 = 1<<24 \| 1<<25 \| 1<<26），一般不用改 | |
-| `official-bot/groups/<group_openid>/config.json` | 每个群的配置，从 `groups/config.example.json` 复制后填写 | |
-| `official-bot/groups/<group_openid>/notes.md`、`knowledge/` | 群笔记、群知识库（knowledge 里的仓库可以用 `kb.py sync` 重新拉） | |
-| `forwarder-url` → `/root/forwarder/url` | webhook 地址（ensure-bots.sh 开机时会复制过去） | `https://...` |
-| `forwarder-key` → `/root/forwarder/key` | webhook 鉴权 key | |
+| `official-bot/appid` | QQ 开放平台机器人的 `AppID` | `<APPID>` |
+| `official-bot/appsecret` | QQ 开放平台机器人的 `AppSecret`（机器人密钥） | `<APPSECRET>` |
+| `official-bot/bot_uin.txt` | 机器人自身的 QQ 号（用于写入转发 Payload 的 `bot_uin` / `self_id`） | `<BOT_QQ>` |
+| `official-bot/bot_name.txt` | （可选）机器人昵称，未配置时默认为 `MaxShenBi` | `MaxShenBi` |
+| `official-bot/bot_openid.txt` | （可选）机器人在群内的 `member_openid`，网关收到 `@` 消息时也会自动学习记录 | `<32位十六进制OPENID>` |
+| `official-bot/group_openid.txt` | 默认群的 `group_openid`（当 `send_group.py` 不传 `--group` 时默认发往该群） | `<32位十六进制GROUP_OPENID>` |
+| `official-bot/intents.txt` | 已包含在仓库中（默认 `117440512` = `1<<24 \| 1<<25 \| 1<<26`），一般无需修改 | `117440512` |
+| `forwarder-url`（同步至 `/root/forwarder/url`） | Grok Bot 中「QQ群自然介入」例程的 Webhook 触发地址（`ensure-bots.sh` 与本地看门狗会自动将其恢复到 `/root/forwarder/url`） | `https://...` |
+| `forwarder-key`（同步至 `/root/forwarder/key`） | Grok Bot Webhook 鉴权 Bearer Key（自动同步到 `/root/forwarder/key`） | `<WEBHOOK_KEY>` |
+| `official-bot/groups/<group_openid>/config.json` | 每个群独立的功能开关与别名配置（可参考 `groups/config.example.json`） | JSON 文件 |
+| `official-bot/groups/<group_openid>/prompt.md` | 每个群专属的 AI 人设与回复风格说明（新群会自动从 `groups/_default/prompt.md` 复制） | Markdown 文件 |
+| `official-bot/groups/<group_openid>/notes.md` | 每个群的长期记忆笔记（记录群友信息、群梗与约定） | Markdown 文件 |
 
-恢复步骤：
-1. `git clone` 到 `/workspace/qq-bot-persist`（路径写死在脚本里）。
-2. 按上表放好文件：`chmod 600 official-bot/appsecret forwarder-key forwarder-url`。
-3. 为每个群建 `official-bot/groups/<openid>/config.json`（参考 `groups/config.example.json`），也可以等机器人被拉进群后由 bridge 自动创建。
-4. `bash ensure-bots.sh` 启动 bridge，在 `official-bot/official-ws-bridge.log` 里看到 `READY` 就算成功。
-5. 运行时数据（last-events、sent-log、ref-cache、日志）会自动重新生成。
+---
+
+## 二、快速恢复步骤
+
+```bash
+# 1. 克隆仓库到固定目录 /workspace/qq-bot-persist
+git clone https://github.com/zard110/maxshenbi-qqbot.git /workspace/qq-bot-persist
+cd /workspace/qq-bot-persist
+
+# 2. 写入 QQ 开放平台凭证与 Grok Bot Webhook 密钥
+echo -n "你的AppID" > official-bot/appid
+echo -n "你的AppSecret" > official-bot/appsecret
+echo -n "机器人QQ号" > official-bot/bot_uin.txt
+echo -n "你的Webhook_URL" > forwarder-url
+echo -n "你的Webhook_Key" > forwarder-key
+chmod 600 official-bot/appid official-bot/appsecret forwarder-url forwarder-key
+
+# 3. 验证凭证是否可用
+python3 official-bot/send_group.py --dry-credentials
+
+# 4. 一键同步配置并启动 WebSocket 网关与本地零 Token 看门狗
+sudo bash /workspace/qq-bot-persist/ensure-bots.sh
+
+# 5. 查看网关日志，出现 READY 即代表连接成功
+tail -n 20 official-bot/official-ws-bridge.log
+```
+
+> 💡 **提示**：首次启动后无需手动创建群文件夹，只需在 QQ 群里 `@机器人` 发一条消息，网关就会自动根据 `official-bot/groups/_default/` 模板生成该群的 `config.json`、`prompt.md` 与 `notes.md`，随后按需修改即可立即生效。
