@@ -78,4 +78,4 @@ def recommend(items, query: str, context: str = "", previous: str = "", seed: st
             "license": item.get("license", "unverified_user_collection"), "source_url": item.get("source_url"),
             "reason": "context_and_reply_chain" if previous else "context_match", "score": score,
             "suggested_delay_ms": 700 + int(tie[:4], 16) % 1100,
-            "with_text": "最多配一句补充；图已表达情绪时不再复述；使用 send_group.py --sticker 执行群级节奏限制"}
+            "with_text": "一图胜千言：纯斗图或图已表达情绪时直接单发图片（不传 --text），切忌画蛇添足配文字说明；使用 send_group.py --sticker"}

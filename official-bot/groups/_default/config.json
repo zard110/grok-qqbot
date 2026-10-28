@@ -39,12 +39,11 @@
     "fallback_on_reject": true
   },
   "reply_policy": {
-    "natural_cooldown": 120,
-    "question_cooldown": 10,
-    "content_window": 300,
-    "topic_window": 600,
-    "inbound_debounce": 12,
-    "sticker_cooldown": 45,
-    "sticker_hourly_limit": 6
+    "inbound_debounce": 0,
+    "natural_cooldown": 0,
+    "question_cooldown": 0,
+    "topic_window": 0,
+    "sticker_cooldown": 0,
+    "sticker_hourly_limit": 0
   }
 }

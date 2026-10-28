@@ -8,7 +8,7 @@ import unicodedata
 
 DEFAULTS = {"natural_cooldown": 120, "question_cooldown": 10,
             "content_window": 300, "topic_window": 600, "inbound_debounce": 12,
-            "sticker_cooldown": 45, "sticker_hourly_limit": 6}
+            "sticker_cooldown": 5, "sticker_hourly_limit": 60}
 QUESTION = re.compile(r"[?？]|请问|怎么|如何|为什么|有没有|谁知道|哪个|哪些|多少|能不能|可不可以|可以吗|行不行|是不是|要不要")
 REQUEST = re.compile(r"对比|比较(?!好|多|少|大|小|高|低|快|慢|喜欢|满意)|看看|评测|打(?:个)?分|分析|推荐|试试|再来|解释|说说|讲讲")
 
@@ -32,7 +32,8 @@ def digest(value) -> str:
 
 
 def topic_tokens(text: str) -> list[str]:
-    words = re.findall(r"[a-z0-9_]{2,}|[\u3400-\u9fff]+", unicodedata.normalize("NFKC", text).lower())
+    cleaned = re.sub(r"https?://\S+|<faceType=[^>]*>|\[(?:自定义表情包|图片|语音|视频|附件)[^\]]*\]", " ", str(text or ""))
+    words = re.findall(r"[a-z0-9_]{2,}|[\u3400-\u9fff]+", unicodedata.normalize("NFKC", cleaned).lower())
     tokens = set()
     for word in words:
         if re.fullmatch(r"[\u3400-\u9fff]+", word):
@@ -86,24 +87,25 @@ def denial(db, scope, action_id, meta, limits, now, force=False):
     if duplicate:
         return "duplicate_content"
     if not force:
-        if meta["trigger"] == "natural" and db.execute("""SELECT 1 FROM outbox WHERE scope=? AND id!=?
+        if meta["trigger"] == "natural" and not meta["sticker"] and limits["natural_cooldown"] > 0 and db.execute("""SELECT 1 FROM outbox WHERE scope=? AND id!=?
                 AND updated>? AND status IN ('inflight','sent','partial') LIMIT 1""",
                 (scope, action_id, now - limits["natural_cooldown"])).fetchone():
             return "natural_cooldown"
         if meta["sticker"]:
-            if db.execute("""SELECT 1 FROM reply_claims r JOIN outbox o ON o.id=r.action_id
+            if limits["sticker_cooldown"] > 0 and db.execute("""SELECT 1 FROM reply_claims r JOIN outbox o ON o.id=r.action_id
                     WHERE r.scope=? AND r.created>? AND r.action_id!=? AND json_extract(r.metadata,'$.sticker')=1
                     AND o.status IN ('pending','inflight','sent','partial') LIMIT 1""",
                     (scope, now - limits["sticker_cooldown"], action_id)).fetchone():
                 return "sticker_cooldown"
-            count = db.execute("""SELECT COUNT(*) FROM reply_claims r JOIN outbox o ON o.id=r.action_id
-                WHERE r.scope=? AND r.created>? AND r.action_id!=? AND json_extract(r.metadata,'$.sticker')=1
-                AND o.status IN ('pending','inflight','sent','partial')""", (scope, now - 3600, action_id)).fetchone()[0]
-            if count >= limits["sticker_hourly_limit"]:
-                return "sticker_hourly_quota"
+            if limits["sticker_hourly_limit"] > 0:
+                count = db.execute("""SELECT COUNT(*) FROM reply_claims r JOIN outbox o ON o.id=r.action_id
+                    WHERE r.scope=? AND r.created>? AND r.action_id!=? AND json_extract(r.metadata,'$.sticker')=1
+                    AND o.status IN ('pending','inflight','sent','partial')""", (scope, now - 3600, action_id)).fetchone()[0]
+                if count >= limits["sticker_hourly_limit"]:
+                    return "sticker_hourly_quota"
         if meta["topic_key"] and meta["trigger"] in {"natural", "question"}:
             window = limits["topic_window"] if meta["trigger"] == "natural" else limits["question_cooldown"]
-            if db.execute("""SELECT 1 FROM reply_claims r JOIN outbox o ON o.id=r.action_id
+            if window > 0 and db.execute("""SELECT 1 FROM reply_claims r JOIN outbox o ON o.id=r.action_id
                     WHERE r.scope=? AND r.created>? AND r.action_id!=? AND json_extract(r.metadata,'$.topic_key')=?
                     AND o.status IN ('pending','inflight','sent','partial') LIMIT 1""",
                     (scope, now - window, action_id, meta["topic_key"])).fetchone():
@@ -119,10 +121,10 @@ def denial(db, scope, action_id, meta, limits, now, force=False):
         # the production escape hatch, but never steals another live source claim.
         if row["status"] == "unknown" or force:
             continue
-        if meta["trigger"] == "natural":
-            if age < limits["natural_cooldown"]:
+        if meta["trigger"] == "natural" and not meta["sticker"]:
+            if limits["natural_cooldown"] > 0 and age < limits["natural_cooldown"]:
                 return "natural_cooldown"
-            if age < limits["topic_window"] and (
+            if limits["topic_window"] > 0 and age < limits["topic_window"] and (
                 (meta["topic_key"] and meta["topic_key"] == other.get("topic_key"))
                 or same_topic(meta["topic_tokens"], other.get("topic_tokens", []))):
                 return "topic_recently_answered"

@@ -431,7 +431,8 @@ def main() -> None:
     store = DeliveryStore()
     with file_lock(LOCK, timeout=180):
         legacy_cooldown = bool(scope == "group" and args.trigger == "legacy" and not args.force
-                               and (recent_sends() or store.recent_actions(base)))
+                               and not args.sticker and not media and limits.get("natural_cooldown", WINDOW) > 0
+                               and (recent_sends() or store.recent_actions(base, limits.get("natural_cooldown", WINDOW))))
         try:
             reserved, previous = store.reserve_action(action_id, base,
                 stable_id(request_parts), force=bool(args.force), reply_meta=meta, limits=limits,

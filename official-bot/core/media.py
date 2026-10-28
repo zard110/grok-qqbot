@@ -15,6 +15,22 @@ from .files import atomic_write_bytes, confined_path
 MAX_MEDIA_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 
+EGRESS_FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _allowed_peer_ip(addr: str, hostname: str = "") -> bool:
+    ip = ipaddress.ip_address(addr)
+    if ip.is_global:
+        return True
+    try:
+        ipaddress.ip_address(hostname.strip("[]"))
+        return False
+    except ValueError:
+        pass
+    if hostname.lower() in {"localhost", "localhost.localdomain"} or hostname.lower().endswith((".local", ".internal")):
+        return False
+    return ip in EGRESS_FAKE_IP_NET
+
 
 class PublicResponse:
     def __init__(self, response, connection):
@@ -41,7 +57,7 @@ def safe_open(url, *, data=None, method="GET", headers=None, timeout=4):
         try:
             connection.connect()
             peer = connection.sock.getpeername()[0]
-            if not ipaddress.ip_address(peer).is_global:
+            if not _allowed_peer_ip(peer, parsed.hostname or ""):
                 raise ValueError("Media connection resolved to a non-public peer")
             path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             connection.request(method, path, body=data, headers=headers or {})
@@ -72,7 +88,7 @@ def validate_url(url: str, *, resolver=socket.getaddrinfo) -> str:
     if parsed.port not in (None, 443):
         raise ValueError("Media URL port is not allowed")
     addresses = resolver(parsed.hostname, 443, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+    if not addresses or any(not _allowed_peer_ip(row[4][0], parsed.hostname or "") for row in addresses):
         raise ValueError("Media URL must resolve only to public addresses")
     return url
 
