@@ -105,6 +105,8 @@ def group_scoped(fn):
     return wrapped
 
 FONT_PATHS = [
+    "C:/Windows/Fonts/msyhbd.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
     "/workspace/video_studio/NotoSansCJKsc-Bold.otf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
@@ -191,7 +193,9 @@ def parse_lines(text: str) -> list[str]:
         ln.strip()
         for ln in text.replace("\\n", "\n").replace("|", "\n").splitlines()
         if ln.strip()
-    ][:2]
+    ]
+    if len(lines) > 2 or any(len(line) > 32 for line in lines):
+        raise ValueError("Caption must be one or two short lines (up to 32 characters each); do not squeeze a paragraph into a sticker")
     return lines or ["？"]
 
 
@@ -218,6 +222,8 @@ def draw_text_lines(
         bbox = draw.textbbox((0, 0), ln, font=font)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
+        if tw > W - 16:
+            raise ValueError("Caption is too wide; shorten it or split into two lines with |")
         tx = (W - tw) // 2 + text_offset[0]
         # Subtle white halo + crisp dark text
         for ox, oy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
@@ -251,7 +257,19 @@ def make_meme(
     tpl_file = _paths().templates / f"{chosen_tpl}.png"
     if not tpl_file.exists():
         tpl_file = _paths().templates / "smirk.png"
-    head = Image.open(tpl_file).convert("RGB")
+    with Image.open(tpl_file) as picture:
+        rgba = picture.convert("RGBA")
+        head = Image.new("RGB", picture.size, "white")
+        head.paste(rgba, (0, 0), rgba)
+    index = json.loads(_paths().index.read_text(encoding="utf-8")) if _paths().index.exists() else {}
+    license_record = index.get("template_licenses", {}).get(chosen_tpl)
+    from core.sticker_pack import attribution_frame
+
+    def provenance(out):
+        if license_record:
+            atomic_write_json(Path(str(out) + ".license.json"), {**license_record,
+                "modified": True, "changes": "Custom caption/layout" + (" and animation" if animate else ""),
+                "output_sha256": hashlib.sha256(out.read_bytes()).hexdigest()})
     lines = parse_lines(text)
     W = 300
 
@@ -261,8 +279,11 @@ def make_meme(
 
     if not animate:
         buffer = io.BytesIO()
+        if license_record:
+            base_canvas = attribution_frame(base_canvas, license_record)
         base_canvas.save(buffer, format="PNG" if out.suffix.lower() == ".png" else "JPEG", quality=92)
         atomic_write_bytes(out, buffer.getvalue())
+        provenance(out)
         record_template(chosen_tpl)
         return str(out), chosen_tpl
 
@@ -319,6 +340,8 @@ def make_meme(
         else:
             frame = base_canvas.copy()
 
+        if license_record:
+            frame = attribution_frame(frame, license_record)
         # Quantize frame for clean compact GIF
         frames.append(frame.quantize(colors=128, method=Image.Quantize.MEDIANCUT))
 
@@ -333,6 +356,7 @@ def make_meme(
         optimize=True,
     )
     atomic_write_bytes(out, buffer.getvalue())
+    provenance(out)
     record_template(chosen_tpl)
     return str(out), chosen_tpl
 
@@ -573,6 +597,25 @@ def add_sticker_to_index(file_arg: str, text: str, category: str = "panda", tags
     return {"ok": True, "status": "added", "entry": entry, "total": len(stickers)}
 
 
+@group_scoped
+def recommend_sticker(query: str, context: str = "", previous: str = "", seed: str = "") -> dict:
+    """Pure recommendation over this group's existing assets; no send/usage mutation."""
+    from core.sticker_policy import recommend
+    data = json.loads(_paths().index.read_text(encoding="utf-8")) if _paths().index.exists() else {}
+    items = [row for row in data.get("ready_stickers", []) if confined_path(_paths().stickers, row.get("file", "")).is_file()]
+    recent = load_recent()["recent_stickers"][-8:]
+    from core.delivery import DeliveryStore
+    with DeliveryStore().connect() as db:
+        rows = db.execute("SELECT metadata FROM reply_claims r JOIN outbox o ON o.id=r.action_id WHERE r.scope=? AND json_extract(r.metadata,'$.sticker')=1 AND o.status IN ('sent','partial') ORDER BY r.created DESC LIMIT 8",
+                          ("/v2/groups/" + _paths().group_openid,)).fetchall()
+    sent_hashes = {value for row in rows if (value := json.loads(row["metadata"]).get("sticker_hash"))}
+    recent += [row["file"] for row in items if row.get("sha256") in sent_hashes]
+    result = recommend(items, query, context, previous, seed, recent)
+    if result.get("should_send"):
+        result["path"] = str(confined_path(_paths().stickers, result["file"]))
+    return result
+
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate or pick custom斗图表情包")
@@ -588,6 +631,10 @@ def main() -> None:
     ap.add_argument("--add-sticker", default=None, help="Copy a validated image into this group's library with SHA-256 dedup")
     ap.add_argument("--tags", default="", help="Comma/space separated tags when using --add-sticker")
     ap.add_argument("--group", help="Group alias or openid (default configured group)")
+    ap.add_argument("--recommend", help="contextual reaction advice without sending or recording selection")
+    ap.add_argument("--context", default="", help="recent conversation (current query has higher weight)")
+    ap.add_argument("--previous-tag", default="", help="previous reaction mood for a complementary reply chain")
+    ap.add_argument("--seed", default="", help="source event identity for stable selection on retries")
     args = ap.parse_args()
     with use_group(args.group):
         run_cli(args, ap)
@@ -604,6 +651,10 @@ def run_cli(args, ap) -> None:
 
     if args.list:
         print(_paths().index.read_text(encoding="utf-8") if _paths().index.exists() else "{}")
+        return
+
+    if args.recommend:
+        print(json.dumps(recommend_sticker(args.recommend, args.context, args.previous_tag, args.seed), ensure_ascii=False, indent=2))
         return
 
     if args.search:

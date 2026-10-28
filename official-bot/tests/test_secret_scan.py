@@ -49,6 +49,19 @@ class SecretScanTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("forbidden path", result.stdout)
 
+    def test_binary_asset_does_not_bypass_literal_token_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.prepare(root)
+            picture = root / "official-bot/assets/openmoji-reactions/test.png"
+            picture.parent.mkdir(parents=True)
+            secret = uuid.uuid4().hex
+            picture.write_bytes(b"\x89PNG\x00\xff\n" + ("Bearer " + secret).encode())
+            subprocess.run(["git", "add", str(picture)], cwd=root, check=True)
+            result = self.scan(root)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

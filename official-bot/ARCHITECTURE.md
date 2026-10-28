@@ -15,6 +15,8 @@ Linux 环境；配置、记忆、后台和离线测试也支持 Windows。
 | `core/qq_client.py` | QQ HTTP、凭据和 Token 生命周期 |
 | `core/media.py` | 附件来源校验、限额及安全缓存 |
 | `core/delivery.py` | 入站去重、投递状态、发送动作与分段进度 |
+| `core/reply_policy.py` / `core/message_format.py` | 回复身份与节奏规则、保守格式选择及分段 |
+| `core/sticker_policy.py` / `core/sticker_pack.py` | 上下文选图、素材校验/许可与离线入库 |
 | `core/memory.py` | 消息窗口、摘要、结构化事实、版本化知识索引 |
 | `core/supervisor.py` | 唯一重启拥有者、退避、退出和日志轮转 |
 | `dashboard.py` | 本机会话认证、管理 API 与可操作的内嵌网页 |
@@ -35,8 +37,7 @@ Webhook 的 `accepted` 仅表示 HTTP 接收成功，不代表外部 Routine 已
 没有远端幂等确认时，网络超时不会被假定为“肯定未发送”。
 
 `send_group.py --action-id` 可给重试使用同一操作身份。定时推送应包含计划时刻，
-例如 `daily-news:<date>:<slot>`，下一期使用新身份。`--force` 仅放宽发言冷却，
-不清除已成功或结果不确定的发送记录。重复调用须检查结构化输出。
+例如 `daily-news:<date>:<slot>`，下一期使用新身份。`--force` 允许人工重试同内容的 unknown/failed；不能改变身份绑定内容或重发 sent/partial。重复调用须检查结构化输出。详见 [回复策略](REPLY_STYLE.md)。
 
 ## 群、插件与权限
 

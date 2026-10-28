@@ -1,0 +1,471 @@
+{
+  "schema_version": 1,
+  "pack_id": "openmoji-reactions",
+  "source_commit": "aeb8bb3a59e2de39c754ac79180c8131c906acea",
+  "retrieved_date": "2026-10-28",
+  "license": "CC-BY-SA-4.0",
+  "assets": [
+    {
+      "id": "laugh",
+      "codepoint": "1F602",
+      "file": "laugh.png",
+      "template": "openmoji_laugh",
+      "description": "笑出声",
+      "tags": [
+        "笑",
+        "哈哈",
+        "绷不住",
+        "好笑"
+      ],
+      "mood": "laugh",
+      "caption_suggestions": [
+        "笑出声"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F602.png",
+      "source_page": "https://openmoji.org/library/emoji-1F602/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "bd6ec82f57463f53926fc9ea3e85a9015362c98eaebaa67d2335e101f803be37",
+      "modified": false
+    },
+    {
+      "id": "rofl",
+      "codepoint": "1F923",
+      "file": "rofl.png",
+      "template": "openmoji_rofl",
+      "description": "笑到打滚",
+      "tags": [
+        "笑疯",
+        "笑死",
+        "离谱"
+      ],
+      "mood": "rofl",
+      "caption_suggestions": [
+        "笑到打滚"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F923.png",
+      "source_page": "https://openmoji.org/library/emoji-1F923/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "e7d14561dbec3b7a31cc04b0d7cb63b0792d8f3816f83f143b1d81ad4cf752d5",
+      "modified": false
+    },
+    {
+      "id": "think",
+      "codepoint": "1F914",
+      "file": "think.png",
+      "template": "openmoji_think",
+      "description": "让我想想",
+      "tags": [
+        "思考",
+        "想想",
+        "分析"
+      ],
+      "mood": "think",
+      "caption_suggestions": [
+        "让我想想"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F914.png",
+      "source_page": "https://openmoji.org/library/emoji-1F914/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "b1c6dc001b1a7898d4f8d6b98e31393469ff6b20fbd974802c2512bdb8584491",
+      "modified": false
+    },
+    {
+      "id": "doubt",
+      "codepoint": "1F928",
+      "file": "doubt.png",
+      "template": "openmoji_doubt",
+      "description": "你确定吗",
+      "tags": [
+        "怀疑",
+        "疑问",
+        "真的假的"
+      ],
+      "mood": "doubt",
+      "caption_suggestions": [
+        "你确定吗"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F928.png",
+      "source_page": "https://openmoji.org/library/emoji-1F928/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "b9efb2c18ac389c30f05f98a8639425b8fa9741a63be2bd2918343b3953cda9a",
+      "modified": false
+    },
+    {
+      "id": "watch",
+      "codepoint": "1F440",
+      "file": "watch.png",
+      "template": "openmoji_watch",
+      "description": "我先围观",
+      "tags": [
+        "围观",
+        "吃瓜",
+        "蹲"
+      ],
+      "mood": "watch",
+      "caption_suggestions": [
+        "我先围观"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F440.png",
+      "source_page": "https://openmoji.org/library/emoji-1F440/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "c50f50432c477b35c522eaad098d8e8f1709a3cab775cbf88804aa68132e6287",
+      "modified": false
+    },
+    {
+      "id": "approve",
+      "codepoint": "1F44D",
+      "file": "approve.png",
+      "template": "openmoji_approve",
+      "description": "这波可以",
+      "tags": [
+        "赞",
+        "同意",
+        "可以",
+        "认可"
+      ],
+      "mood": "approve",
+      "caption_suggestions": [
+        "这波可以"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F44D.png",
+      "source_page": "https://openmoji.org/library/emoji-1F44D/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "ba9bb893723af354fbb738b20569bbd73ed98df6640a17f4330f4e32884f4957",
+      "modified": false
+    },
+    {
+      "id": "clap",
+      "codepoint": "1F44F",
+      "file": "clap.png",
+      "template": "openmoji_clap",
+      "description": "给你鼓掌",
+      "tags": [
+        "鼓掌",
+        "厉害",
+        "大佬"
+      ],
+      "mood": "clap",
+      "caption_suggestions": [
+        "给你鼓掌"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F44F.png",
+      "source_page": "https://openmoji.org/library/emoji-1F44F/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "e4d8a91b2962b7012dcf90d59a20e631191f9277cd4389f4cbc6cda84ba8c6f9",
+      "modified": false
+    },
+    {
+      "id": "shock",
+      "codepoint": "1F631",
+      "file": "shock.png",
+      "template": "openmoji_shock",
+      "description": "好家伙",
+      "tags": [
+        "震惊",
+        "惊讶",
+        "好家伙"
+      ],
+      "mood": "shock",
+      "caption_suggestions": [
+        "好家伙"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F631.png",
+      "source_page": "https://openmoji.org/library/emoji-1F631/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "8d76183b0625f4e4f41c8e10f2e7a37982a6ba1e9d368db5412340bffa58e95a",
+      "modified": false
+    },
+    {
+      "id": "cry",
+      "codepoint": "1F62D",
+      "file": "cry.png",
+      "template": "openmoji_cry",
+      "description": "这谁顶得住",
+      "tags": [
+        "哭",
+        "难过",
+        "崩溃"
+      ],
+      "mood": "cry",
+      "caption_suggestions": [
+        "这谁顶得住"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F62D.png",
+      "source_page": "https://openmoji.org/library/emoji-1F62D/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "bc403528c3b82b779d99cd966867c8513bb454a7368113a88087bd2643f1bb5f",
+      "modified": false
+    },
+    {
+      "id": "surprise",
+      "codepoint": "1F62E",
+      "file": "surprise.png",
+      "template": "openmoji_surprise",
+      "description": "还有这种操作",
+      "tags": [
+        "意外",
+        "惊讶",
+        "操作"
+      ],
+      "mood": "surprise",
+      "caption_suggestions": [
+        "还有这种操作"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F62E.png",
+      "source_page": "https://openmoji.org/library/emoji-1F62E/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "609f3c66d202fe605b040fd22ee6b8178233cc96707618306b44399baffe6b72",
+      "modified": false
+    },
+    {
+      "id": "cool",
+      "codepoint": "1F60E",
+      "file": "cool.png",
+      "template": "openmoji_cool",
+      "description": "稳了",
+      "tags": [
+        "酷",
+        "稳",
+        "自信"
+      ],
+      "mood": "cool",
+      "caption_suggestions": [
+        "稳了"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F60E.png",
+      "source_page": "https://openmoji.org/library/emoji-1F60E/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "a04627439215141b0e8f13a592f509f4259f9cbb49b7da17511e79dd88506b4b",
+      "modified": false
+    },
+    {
+      "id": "sleep",
+      "codepoint": "1F634",
+      "file": "sleep.png",
+      "template": "openmoji_sleep",
+      "description": "我先躺会",
+      "tags": [
+        "困",
+        "睡觉",
+        "躺平"
+      ],
+      "mood": "sleep",
+      "caption_suggestions": [
+        "我先躺会"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F634.png",
+      "source_page": "https://openmoji.org/library/emoji-1F634/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "c6743584d5ae363586bed4350dd6726c7ad36b183a7c2de09496365b45b314bf",
+      "modified": false
+    },
+    {
+      "id": "sweat",
+      "codepoint": "1F605",
+      "file": "sweat.png",
+      "template": "openmoji_sweat",
+      "description": "问题不大吧",
+      "tags": [
+        "尴尬",
+        "汗",
+        "心虚"
+      ],
+      "mood": "sweat",
+      "caption_suggestions": [
+        "问题不大吧"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F605.png",
+      "source_page": "https://openmoji.org/library/emoji-1F605/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "d9b568ccf1ea72409b243ba91e7d467428415719347756411c04e45e1b345835",
+      "modified": false
+    },
+    {
+      "id": "determined",
+      "codepoint": "1F624",
+      "file": "determined.png",
+      "template": "openmoji_determined",
+      "description": "再来一次",
+      "tags": [
+        "加油",
+        "努力",
+        "不服"
+      ],
+      "mood": "determined",
+      "caption_suggestions": [
+        "再来一次"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F624.png",
+      "source_page": "https://openmoji.org/library/emoji-1F624/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "8ff158d64c8a651ca598036eed0a1b86f4a6d256f5765aba78ef8ff31e040ea5",
+      "modified": false
+    },
+    {
+      "id": "handshake",
+      "codepoint": "1F91D",
+      "file": "handshake.png",
+      "template": "openmoji_handshake",
+      "description": "达成共识",
+      "tags": [
+        "握手",
+        "合作",
+        "同意"
+      ],
+      "mood": "handshake",
+      "caption_suggestions": [
+        "达成共识"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F91D.png",
+      "source_page": "https://openmoji.org/library/emoji-1F91D/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "633cc919ae7b8f8a4e36b3a879acdf8840cef0ccbfce9f5ddd551cb692227f6b",
+      "modified": false
+    },
+    {
+      "id": "thanks",
+      "codepoint": "1F64F",
+      "file": "thanks.png",
+      "template": "openmoji_thanks",
+      "description": "谢谢大佬",
+      "tags": [
+        "感谢",
+        "谢谢",
+        "拜托"
+      ],
+      "mood": "thanks",
+      "caption_suggestions": [
+        "谢谢大佬"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F64F.png",
+      "source_page": "https://openmoji.org/library/emoji-1F64F/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "df99d339f94f24c48851943d590ee75f8500f0d49c1f441795f8bb2fbeee6d5a",
+      "modified": false
+    },
+    {
+      "id": "celebrate",
+      "codepoint": "1F389",
+      "file": "celebrate.png",
+      "template": "openmoji_celebrate",
+      "description": "值得庆祝",
+      "tags": [
+        "庆祝",
+        "成功",
+        "恭喜"
+      ],
+      "mood": "celebrate",
+      "caption_suggestions": [
+        "值得庆祝"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F389.png",
+      "source_page": "https://openmoji.org/library/emoji-1F389/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "fb6acda8be547106ad5bd5ee68ee29866dc952703c387590915f8babf80dca6f",
+      "modified": false
+    },
+    {
+      "id": "fire",
+      "codepoint": "1F525",
+      "file": "fire.png",
+      "template": "openmoji_fire",
+      "description": "燃起来了",
+      "tags": [
+        "燃",
+        "热血",
+        "加油"
+      ],
+      "mood": "fire",
+      "caption_suggestions": [
+        "燃起来了"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F525.png",
+      "source_page": "https://openmoji.org/library/emoji-1F525/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "6e453c2798b7841089720f0d8a07d81a9439b22c9cd54cae4adf2b898ddadb43",
+      "modified": false
+    },
+    {
+      "id": "cat",
+      "codepoint": "1F408",
+      "file": "cat.png",
+      "template": "openmoji_cat",
+      "description": "猫猫路过",
+      "tags": [
+        "猫",
+        "摸鱼",
+        "路过"
+      ],
+      "mood": "cat",
+      "caption_suggestions": [
+        "猫猫路过"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F408.png",
+      "source_page": "https://openmoji.org/library/emoji-1F408/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "07bda0a7581705970eb8939ba77dd1d3cbf7c10a2aeda61048226d5299512844",
+      "modified": false
+    },
+    {
+      "id": "dog",
+      "codepoint": "1F415",
+      "file": "dog.png",
+      "template": "openmoji_dog",
+      "description": "狗子收到",
+      "tags": [
+        "狗",
+        "收到",
+        "懂了"
+      ],
+      "mood": "dog",
+      "caption_suggestions": [
+        "狗子收到"
+      ],
+      "source_url": "https://raw.githubusercontent.com/hfg-gmuend/openmoji/aeb8bb3a59e2de39c754ac79180c8131c906acea/color/618x618/1F415.png",
+      "source_page": "https://openmoji.org/library/emoji-1F415/",
+      "author": "OpenMoji contributors",
+      "license": "CC-BY-SA-4.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "sha256": "3d0549a4b10cd13b4d60588484e73c553dee94a436cd328935d31594d550e3aa",
+      "modified": false
+    }
+  ]
+}

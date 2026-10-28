@@ -1,9 +1,18 @@
 {
   "_comment": "新群自动创建的默认配置模板。机器人首次被拉进群或在群内收到消息时，默认只开启被 @ 礼貌回复；如需开启自然插话、定时资讯或生图等功能，请在该群自己的 config.json 中开启。",
   "enabled": true,
-  "enabled_plugins": ["command", "kb", "sticker", "digest", "reply", "natural_reply"],
+  "enabled_plugins": [
+    "command",
+    "kb",
+    "sticker",
+    "digest",
+    "reply",
+    "natural_reply"
+  ],
   "plugin_bindings": {},
-  "quotas": {"max_actions_per_day": 500},
+  "quotas": {
+    "max_actions_per_day": 50000
+  },
   "features": {
     "natural_reply": false,
     "at_reply": true,
@@ -17,5 +26,25 @@
   },
   "style": "礼貌、简洁，用中文回答；只在被 @ 时回复；不主动推送。",
   "admins": [],
-  "knowledge": {"docs_dir": "knowledge/", "repos": []}
+  "knowledge": {
+    "docs_dir": "knowledge/",
+    "repos": []
+  },
+  "message_format": {
+    "markdown_verified": false,
+    "tables_verified": false,
+    "fenced_code_verified": false,
+    "max_chars": 1000,
+    "max_parts": 3,
+    "fallback_on_reject": true
+  },
+  "reply_policy": {
+    "natural_cooldown": 120,
+    "question_cooldown": 10,
+    "content_window": 300,
+    "topic_window": 600,
+    "inbound_debounce": 12,
+    "sticker_cooldown": 45,
+    "sticker_hourly_limit": 6
+  }
 }

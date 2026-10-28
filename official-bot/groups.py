@@ -97,6 +97,16 @@ def validate_config(raw: dict) -> None:
             raise ConfigError("Plugin permissions must be a string list")
         _validate_quota(binding.get("quota", {}))
     _validate_quota(raw.get("quotas", {}))
+    from core.message_format import policy as format_policy
+    from core.reply_policy import settings as reply_settings
+    for key in ("message_format", "reply_policy"):
+        if key in raw and not isinstance(raw[key], dict):
+            raise ConfigError(f"{key} must be an object")
+    try:
+        format_policy(raw)
+        reply_settings(raw)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     knowledge = raw.get("knowledge", {})
     if not isinstance(knowledge, dict) or not isinstance(knowledge.get("repos", []), list):
         raise ConfigError("knowledge must contain a repository list")
@@ -318,7 +328,10 @@ def _cli() -> None:
     args = sys.argv[1:]
     cmd = args[0] if args else "list"
     if cmd == "list":
-        dgo = default_group_openid()
+        try:
+            dgo = default_group_openid()
+        except FileNotFoundError:
+            dgo = None
         for c in all_groups():
             mark = "*" if c["group_openid"] == dgo else " "
             en = "ON " if c.get("enabled") else "OFF"

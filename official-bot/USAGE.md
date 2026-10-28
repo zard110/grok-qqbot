@@ -1,12 +1,16 @@
 # MaxShenBi 官方机器人：send_group.py 用法 + 收到的消息字段（2026-10-28 更新）
 
 脚本：`python3 /workspace/qq-bot-persist/official-bot/send_group.py ...`
-规则不变：发消息前先 `--recent`；120 秒内已经发过会拒发（exit 3），确实是新的点才加 `--force`；发图/语音/视频/文件也算一次发送。
+旧 CLI 保留按群 120 秒冷却；新例程使用 `--trigger` 区分自然闲聊、问句与 @ 回复。`--recent` 仅辅助观察，最终以发送器的事务校验为准。例程不得自动加 `--force`。
 
 新增分层实现见 [ARCHITECTURE.md](ARCHITECTURE.md)，迁移见 [MIGRATION.md](MIGRATION.md)。
-`--force` 仅绕过业务冷却；稳定操作身份及已成功/不确定的发送记录仍受保护。
+`--force` 允许人工重试同内容 unknown/failed 并绕过普通冷却；sent/partial 以及其他例程已占用的来源仍受保护。
 重复业务调用可传 `--action-id <稳定操作标识>`，多段发送按 part 记录状态。
 `--dry-run` 始终不上传或发送，包括与 `--upload-only` 组合时。
+
+新格式、去重、斗图策略和可复制例程约束见 [REPLY_STYLE.md](REPLY_STYLE.md)。
+
+新增参数：`--format auto|plain|markdown`、`--max-chars`、`--max-parts`、`--source-event-id`、`--trigger legacy|natural|at|question|command`、`--topic-text`、`--topic-key`、`--sticker`。默认不变；自动模式按群验证能力，长消息有界分段、超限报错，不截断。
 
 ## 一、发送选项
 
@@ -73,6 +77,7 @@ sent-log.jsonl 每次发送记一行：`ts, at, scope(group/c2c), kind(text/mark
 - `card`：分享卡片 `{ark_type, ark_name, title, desc, url, source}`，没有就是 null。
 - `ref_idx`：这条消息自己的 REFIDX，**用来 `--reply-to` 引用它**。
 - `member_role`：owner/admin/member。
+- `reply_context`：稳定 source_event_id/action_id、trigger、topic_text/topic_key 与发送约定。例程发送时必须透传这些字段。
 - 原有：`at_me, from_bot, msg_id, event_id, member_openid, sender.nickname, ...`
 
 ### 多群字段（所有群事件都带，见 MULTIGROUP.md）

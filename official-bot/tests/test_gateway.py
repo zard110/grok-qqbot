@@ -13,6 +13,50 @@ spec.loader.exec_module(gateway)
 
 
 class GatewayTests(unittest.TestCase):
+    def test_non_admin_memory_command_is_delegated_with_errors(self):
+        class Response(io.BytesIO):
+            status = 202
+        opener = Mock()
+        opener.open.return_value = Response(b"{}")
+        with tempfile.TemporaryDirectory() as directory, patch.object(gateway, "DIR", Path(directory)), \
+             patch.object(gateway.G, "group_dir", return_value=Path(directory) / "group"), \
+             patch("core.plugins.dispatch", return_value={"actions": [], "errors": ["command:PermissionError"]}), \
+             patch.object(gateway, "rd", side_effect=lambda path: "https://example.com/test" if str(path).endswith("url") else "fixture-key"), \
+             patch.object(gateway.urllib.request, "build_opener", return_value=opener):
+            self.assertEqual(gateway.forward({"post_type": "message", "group_openid": "A" * 32,
+                "text_only": "/记忆 我要记住", "delivery_id": "command", "at_me": False,
+                "features": {"natural_reply": False}}), "accepted")
+        payload = json.loads(opener.open.call_args.args[0].data)
+        self.assertEqual(payload["plugin_errors"], ["command:PermissionError"])
+        self.assertFalse(payload["local_actions_completed"])
+        self.assertEqual(payload["reply_context"]["trigger"], "command")
+
+    def test_natural_burst_gates_webhook_but_at_bypasses_it(self):
+        from core.delivery import DeliveryStore
+        class Response(io.BytesIO):
+            status = 202
+        opener = Mock()
+        opener.open.side_effect = lambda *a, **kw: Response(b"{}")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = DeliveryStore(root / "runtime.sqlite3")
+            group = "A" * 32
+            action = {"type": "routine.reply", "group_openid": group, "plugin_id": "natural_reply", "config_revision": 1}
+            with patch.object(gateway, "DIR", root), patch.object(gateway, "DeliveryStore", return_value=store), \
+                 patch.object(gateway.G, "group_dir", return_value=root / "group"), \
+                 patch.object(gateway.G, "load_config", return_value={"revision": 1}), \
+                 patch.object(gateway.G, "plugin_enabled", return_value=True), \
+                 patch("core.plugins.dispatch", return_value={"actions": [action], "errors": []}), \
+                 patch("core.action_runner.run_actions", return_value=[]), \
+                 patch.object(gateway, "rd", side_effect=lambda path: "https://example.com/test" if str(path).endswith("url") else "fixture-key"), \
+                 patch.object(gateway.urllib.request, "build_opener", return_value=opener):
+                event = {"post_type": "message", "group_openid": group, "text_only": "骑行训练",
+                         "msg_id": "one", "features": {"natural_reply": True, "at_reply": True}}
+                self.assertEqual(gateway.forward(dict(event)), "accepted")
+                self.assertEqual(gateway.forward({**event, "msg_id": "two"}), "skipped")
+                self.assertEqual(gateway.forward({**event, "msg_id": "three", "at_me": True}), "accepted")
+            self.assertEqual(opener.open.call_count, 2)
+
     def test_persistence_failure_does_not_advance_resume_cursor(self):
         bridge = gateway.Bridge.__new__(gateway.Bridge)
         bridge.seq = 5

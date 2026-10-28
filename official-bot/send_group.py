@@ -23,10 +23,11 @@ from pathlib import Path
 CODE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(CODE_DIR))
 from core.settings import DATA_DIR
-from core.files import file_lock, append_jsonl, confined_path
+from core.files import file_lock, append_jsonl, confined_path, tail_jsonl
 from core.qq_client import client as qq_client, QQTransportError, classify_status
 from core.media import read_local, image_info, validate_url, safe_open
-from core.delivery import DeliveryStore, stable_id
+from core.delivery import DeliveryStore, ReplySuppressed, stable_id
+from core import message_format, reply_policy
 DIR = DATA_DIR
 import groups as G  # noqa: E402
 API = "https://api.sgroup.qq.com"
@@ -82,24 +83,10 @@ def log_sent(entry: dict) -> None:
 
 
 def recent_sends(window: int = WINDOW):
-    res = []
-    try:
-        now = time.time()
-        from collections import deque
-        with open(SENT_LOG, encoding="utf-8") as stream:
-            lines = deque(stream, maxlen=200)
-        for line in lines:
-            try:
-                e = json.loads(line)
-            except Exception:
-                continue
-            if e.get("scope", "group") != "group" or e.get("kind") == "recall":
-                continue
-            if now - e.get("ts", 0) <= window:
-                res.append(e)
-    except FileNotFoundError:
-        pass
-    return res
+    now = time.time()
+    return [row for row in tail_jsonl(SENT_LOG)
+            if row.get("scope", "group") == "group" and row.get("kind") != "recall"
+            and isinstance(row.get("ts"), (int, float)) and now - row["ts"] <= window]
 
 
 def _to_silk(path: str) -> str:
@@ -201,7 +188,7 @@ def post_message(base: str, payload: dict, *, msg_id, event_id, reply_to, seq_of
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to, "ignore_get_message_error": True}
     code, resp = api("POST", f"{base}/messages", payload)
-    return {"http_status": code, "body": resp, "ok": code < 300}
+    return {"http_status": code, "body": resp, "ok": code < 300 and (not isinstance(resp, dict) or resp.get("code", 0) in (0, "0", None))}
 
 
 def main() -> None:
@@ -218,7 +205,7 @@ def main() -> None:
     ap.add_argument("--msg-id", dest="msg_id", help="event message id for passive reply")
     ap.add_argument("--event-id", dest="event_id", help="event id for passive reply to an event (INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE)")
     ap.add_argument("--msg-seq", dest="msg_seq", type=int, help="optional msg_seq")
-    ap.add_argument("--action-id", help="stable business action id; repeat invocations never resend, including --force")
+    ap.add_argument("--action-id", help="stable action id; --force retries only failed/unknown with identical content")
     ap.add_argument("--group", help="target group: alias (e.g. zwift), name, QQ number or group_openid. Default: Zwift练功房")
     ap.add_argument("--group-openid", dest="group_openid", help="same as --group (kept for old commands)")
     ap.add_argument("--feature", help="refuse (exit 4) unless this feature is on in the group's config.json, e.g. daily_ai_news")
@@ -229,7 +216,16 @@ def main() -> None:
     ap.add_argument("--upload-only", action="store_true", help="only upload media and print file_info (sends nothing)")
     ap.add_argument("--dry-run", action="store_true", help="print the request payload(s) and exit (sends nothing; no upload)")
     ap.add_argument("--dry-credentials", action="store_true", help="only verify token + group_openid (no send)")
+    ap.add_argument("--format", choices=["auto", "plain", "markdown"], help="presentation mode; auto uses group-verified capabilities")
+    ap.add_argument("--max-chars", type=int, help="part size 120..2000 (default 1000)")
+    ap.add_argument("--max-parts", type=int, help="maximum parts 1..5 (default 3); never silently truncates")
+    ap.add_argument("--trigger", choices=["legacy", "natural", "at", "question", "command"], default="legacy")
+    ap.add_argument("--source-event-id", help="stable source identity shared by all routines handling an event")
+    ap.add_argument("--topic-text", default="", help="incoming topic, not the generated reply")
+    ap.add_argument("--topic-key", default="", help="stable topic id when supplied by the bridge")
+    ap.add_argument("--sticker", action="store_true", help="enforce sticker pacing and a short natural delay")
     args = ap.parse_args()
+    policy_plugin = args.plugin_id or {"natural": "natural_reply", "question": "natural_reply", "at": "reply", "command": "command"}.get(args.trigger)
 
     goid = None if args.user_openid else G.resolve(args.group or args.group_openid)
     set_target_files(goid, args.user_openid)
@@ -243,6 +239,7 @@ def main() -> None:
         tok = get_token()
         print(json.dumps({"ok": True, "group_openid": goid, "token_available": bool(tok)}, ensure_ascii=False, indent=2))
         return
+    cfg = {}
     if goid:
         cfg = G.load_config(goid)
         if cfg is not None and not cfg.get("enabled", True) and not args.recall:
@@ -251,8 +248,8 @@ def main() -> None:
         if args.feature and cfg is not None and not (cfg.get("features") or {}).get(args.feature):
             print(json.dumps({"skipped": True, "reason": f"feature {args.feature!r} is off for group {cfg.get('name')}"}, ensure_ascii=False))
             sys.exit(4)
-        if args.plugin_id:
-            G.authorize(goid, args.plugin_id, "message.send")
+        if policy_plugin:
+            G.authorize(goid, policy_plugin, "message.send")
     base = target_path(goid, args.user_openid)
     scope = "c2c" if args.user_openid else "group"
 
@@ -263,16 +260,7 @@ def main() -> None:
         from collections import deque
         from urllib.parse import quote
         with file_lock(LOCK, timeout=180):
-            try:
-                with open(SENT_LOG, encoding="utf-8") as stream:
-                    records = []
-                    for line in deque(stream, maxlen=200):
-                        try:
-                            records.append(json.loads(line))
-                        except ValueError:
-                            continue
-            except FileNotFoundError:
-                records = []
+            records = tail_jsonl(SENT_LOG)
             if not any(row.get("id") == args.recall and row.get("kind") != "recall" and row.get("scope", "group") == scope and time.time() - row.get("ts", 0) <= 120 for row in records):
                 raise SystemExit("Recall requires a recent confirmed send in this conversation")
             action_id = stable_id([base, "recall", args.recall])
@@ -321,7 +309,6 @@ def main() -> None:
 
     # build message plan (list of payloads); file_info filled after upload
     plan: list[dict] = []
-    caption_label = ""
     import re as _re
 
     def _norm_at_for_text(s: str) -> str:
@@ -342,50 +329,65 @@ def main() -> None:
     combined_caption = args.text if args.text is not None else (args.markdown or "")
     has_at_tag = bool(_re.search(r"<qqbot-at-user|<@[0-9A-Fa-f]{16,}>", combined_caption))
     markdown_image = bool(media and media[0][0] == "image" and has_at_tag and not media[0][1].startswith(("https://", "http://")))
-    if markdown_image:
-        norm_caption = _norm_at_for_md(combined_caption)
-        md_content = norm_caption + "\n<uploaded-image>"
-        md = {"msg_type": 2, "markdown": {"content": md_content}}
-        if keyboard:
-            md["keyboard"] = keyboard
-        plan.append(md)
-        caption_label = md_content
-    elif media:
-        mp: dict = {"msg_type": 7, "media": {"file_info": "<upload>"}}
-        if args.text is not None:
-            mp["content"] = _norm_at_for_text(args.text)  # text caption rides in the same message
+    settings = message_format.policy(cfg)
+    if args.sticker and (not media or media[0][0] != "image"):
+        ap.error("--sticker requires --image")
+    parts, format_warnings = message_format.prepare(combined_caption, "markdown" if args.markdown is not None else "plain",
+        cfg, mode=args.format, max_chars=args.max_chars, max_parts=args.max_parts)
+    for part in parts:
+        if part["msg_type"] == 2:
+            part["markdown"]["content"] = _norm_at_for_md(part["markdown"]["content"])
         else:
-            mp["content"] = " "
-        plan.append(mp)
-        if args.markdown is not None:
-            md = {"msg_type": 2, "markdown": {"content": _norm_at_for_md(args.markdown)}}
-            if keyboard:
-                md["keyboard"] = keyboard
-            plan.append(md)  # caption as a separate message right after the media
-        caption_label = args.text if args.text is not None else (args.markdown or "")
-    elif args.markdown is not None:
-        md = {"msg_type": 2, "markdown": {"content": _norm_at_for_md(args.markdown)}}
+            part["content"] = _norm_at_for_text(part["content"])
+    if keyboard and (len(parts) != 1 or parts[0]["msg_type"] != 2):
+        ap.error("keyboard requires a single Markdown part; shorten content or explicitly choose --format markdown")
+    if keyboard:
+        parts[0]["keyboard"] = keyboard
+    if markdown_image:
+        if len(combined_caption) > (args.max_chars or settings["max_chars"]) - 200:
+            ap.error("image + mention caption is too long; shorten the caption")
+        md = {"msg_type": 2, "markdown": {"content": _norm_at_for_md(combined_caption) + "\n<uploaded-image>"}}
         if keyboard:
             md["keyboard"] = keyboard
         plan.append(md)
+        format_warnings.append("Image + mention uses the existing Markdown media route; verify client visibility")
+    elif media:
+        mp = {"msg_type": 7, "media": {"file_info": "<upload>"}, "content": " "}
+        if parts and parts[0]["msg_type"] == 0:
+            mp["content"] = parts.pop(0)["content"] or " "
+        plan = [mp, *parts] if combined_caption else [mp]
     else:
-        plan.append({"msg_type": 0, "content": _norm_at_for_text(args.text)})
+        plan = parts
+    if len(plan) > (args.max_parts or settings["max_parts"]):
+        ap.error("media and caption exceed maximum message parts; shorten the reply")
 
     if args.dry_run:
-        print(json.dumps({"dry_run": True, "group": goid, "sent_log": SENT_LOG, "target": base + "/messages", "plan": plan, "reply_to": args.reply_to, "msg_id": args.msg_id, "event_id": args.event_id}, ensure_ascii=False, indent=2))
+        print(json.dumps({"dry_run": True, "group": goid, "sent_log": SENT_LOG, "target": base + "/messages", "plan": plan, "format_warnings": format_warnings, "reply_to": args.reply_to, "msg_id": args.msg_id, "event_id": args.event_id}, ensure_ascii=False, indent=2))
         return
 
     media_identity = []
     for kind, source in media:
         media_identity.append([kind, source if source.startswith(("http://", "https://")) else hashlib.sha256(read_local(source)).hexdigest()])
-    trigger = args.msg_id or args.event_id or (time.time_ns() if args.force else int(time.time() // WINDOW))
+    trigger = args.source_event_id or args.msg_id or args.event_id or (time.time_ns() if args.force else int(time.time() // WINDOW))
     action_id = stable_id([base, args.action_id]) if args.action_id else stable_id([base, trigger, plan, media_identity, args.reply_to])
+    meta = reply_policy.metadata(args.trigger, args.source_event_id or args.msg_id or args.event_id,
+        message_format.plain_text(combined_caption), media_identity, topic_text=args.topic_text,
+        topic_key=args.topic_key, sticker=args.sticker)
+    if args.sticker and media_identity:
+        meta["sticker_hash"] = media_identity[0][1]
+    limits = reply_policy.settings(cfg)
     store = DeliveryStore()
     with file_lock(LOCK, timeout=180):
-        if scope == "group" and (recent_sends() or store.recent_actions(base)) and not args.force:
+        if scope == "group" and args.trigger == "legacy" and (recent_sends() or store.recent_actions(base)) and not args.force:
             print(json.dumps({"skipped": True, "reason": "Group cooldown active", "recent": recent_sends()}))
             raise SystemExit(3)
-        reserved, previous = store.reserve_action(action_id, base, stable_id([plan, media_identity, args.reply_to, args.msg_id, args.event_id]), force=bool(args.force))
+        try:
+            reserved, previous = store.reserve_action(action_id, base,
+                stable_id([plan, media_identity, args.reply_to, args.msg_id, args.event_id]),
+                force=bool(args.force), reply_meta=meta, limits=limits)
+        except ReplySuppressed as error:
+            print(json.dumps({"skipped": True, "reason": str(error), "action_id": action_id}))
+            raise SystemExit(3)
         if not reserved:
             status = previous["status"]
             if status in {"pending", "inflight"}:
@@ -395,6 +397,8 @@ def main() -> None:
             raise SystemExit(0 if status == "sent" else 5)
         results, state, up = [], "failed", None
         try:
+            if args.sticker and args.trigger == "natural":
+                time.sleep(.7 + int(action_id[:4], 16) % 1100 / 1000)
             if markdown_image:
                 murl, width, height = upload_markdown_image(media[0][1])
                 plan[0]["markdown"]["content"] = _norm_at_for_md(combined_caption) + f"\n![image #{width}px #{height}px]({murl})"
@@ -407,8 +411,8 @@ def main() -> None:
                     cfg = G.load_config(goid)
                     if cfg is None or not cfg.get("enabled", True) or (args.feature and not (cfg.get("features") or {}).get(args.feature)):
                         raise RuntimeError("Group policy no longer allows this send")
-                    if args.plugin_id:
-                        G.authorize(goid, args.plugin_id, "message.send")
+                    if policy_plugin:
+                        G.authorize(goid, policy_plugin, "message.send")
                 if args.msg_id or args.event_id:
                     payload["msg_seq"] = (args.msg_seq if args.msg_seq is not None else int(action_id[:8], 16) % 1_000_000) + index
                 store.action_status(action_id, "inflight")
@@ -416,6 +420,17 @@ def main() -> None:
                 state = "unknown"
                 result = post_message(base, payload, msg_id=args.msg_id, event_id=args.event_id,
                     reply_to=args.reply_to if index == 0 else None)
+                fallback_cfg = {**(cfg or {}), "message_format": {**message_format.policy(cfg), "max_chars": args.max_chars or settings["max_chars"]}}
+                if message_format.may_fallback(result, payload, fallback_cfg):
+                    # Only a definite format rejection may take this branch. A
+                    # timeout or successful HTTP response is never replayed.
+                    rejection = {"http_status": result["http_status"], "body": result["body"]}
+                    payload = {"msg_type": 0, "content": _norm_at_for_text(message_format.plain_text(payload["markdown"]["content"]))}
+                    if args.msg_id or args.event_id:
+                        payload["msg_seq"] = (args.msg_seq if args.msg_seq is not None else int(action_id[:8], 16) % 1_000_000) + index
+                    result = post_message(base, payload, msg_id=args.msg_id, event_id=args.event_id,
+                        reply_to=args.reply_to if index == 0 else None)
+                    result["format_fallback"] = rejection
                 results.append(result)
                 part_state = "sent" if result["ok"] else ("unknown" if result["http_status"] >= 500 else "failed")
                 store.part_status(action_id, index, part_state, result)
@@ -430,7 +445,7 @@ def main() -> None:
                 try:
                     log_sent({"ts": time.time(), "at": time.strftime("%H:%M:%S"), "scope": scope, "kind": kind,
                         "content": content, "id": body.get("id") or "", "action_id": action_id,
-                        "ref_idx": (body.get("ext_info") or {}).get("ref_idx") or "", "keyboard": bool(payload.get("keyboard"))})
+                        "reply_policy": meta, "ref_idx": (body.get("ext_info") or {}).get("ref_idx") or "", "keyboard": bool(payload.get("keyboard"))})
                     from core.memory import MemoryStore
                     MemoryStore(DIR).add_message(goid or "c2c:" + args.user_openid, "out:" + str(body.get("id") or action_id + ":" + str(index)), content, direction="out")
                 except Exception:
@@ -440,7 +455,7 @@ def main() -> None:
                 state = "partial"
             results.append({"ok": False, "error": type(error).__name__, "reason": "See durable delivery status before retrying"})
         store.action_status(action_id, state, {"results": results})
-        print(json.dumps({"ok": state == "sent", "status": state, "action_id": action_id, "results": results}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": state == "sent", "status": state, "action_id": action_id, "format_warnings": format_warnings, "results": results}, ensure_ascii=False, indent=2))
         raise SystemExit(0 if state == "sent" else 5 if state in {"unknown", "partial"} else 1)
 
 

@@ -1,5 +1,8 @@
 # MaxShenBi QQ 官方机器人核心模块（`official-bot/`）
 
+2026-10-28 更新：[消息格式、并发去重、例程约束与许可表情素材包](REPLY_STYLE.md)。新增 20 张 OpenMoji 反应图及 20 个改字模板，可离线安装；真实群数据仍不入 Git。
+
+
 本目录存放 QQ 开放平台官方机器人的核心网关桥接、消息发送、多群管理、知识库检索、斗图表情包工坊以及本地零 Token 看门狗脚本。完整安装与 Grok Bot 例程配置指南请先阅读仓库根目录的 **[README.md](../README.md)**。
 
 ---
@@ -56,7 +59,7 @@ setsid nohup bash /workspace/qq-bot-persist/official-bot/run-local-watchdog.sh >
 
 ## 🎨 斗图表情包工坊（`make_sticker.py`）
 
-支持基于 25 套经典表情包底图（二哈、柴犬、熊猫头、佩佩蛙、汤姆猫、章鱼哥等）动态排版加字、生成 GIF 动效（`shake` 震动 / `zoom` 冲屏 / `bounce` Q弹）、按关键词从本地图库检索现成表情包（内置最近 25 次防重复记忆），以及将群友新图 MD5 去重入库：
+支持基于 25 套经典表情包底图（二哈、柴犬、熊猫头、佩佩蛙、汤姆猫、章鱼哥等）动态排版加字、生成 GIF 动效（`shake` 震动 / `zoom` 冲屏 / `bounce` Q弹）、按关键词从本地图库检索现成表情包（内置最近 25 次防重复记忆），以及将群友新图 SHA-256 去重入库：
 
 ```bash
 # 1. 随机或指定模板加字生成静态梗图（支持用 | 分隔上下两行文字）
@@ -73,7 +76,7 @@ python3 /workspace/qq-bot-persist/official-bot/make_sticker.py --pick "二哈 �
 # 4. 全库语义检索最匹配的现成图与模板候选
 python3 /workspace/qq-bot-persist/official-bot/make_sticker.py --search "打工人 摸鱼"
 
-# 5. 将群友发送的新表情包去重入库（自动计算 MD5 防重复）
+# 5. 将群友发送的新表情包去重入库（自动计算 SHA-256 防重复）
 python3 /workspace/qq-bot-persist/official-bot/make_sticker.py \
   --add-sticker stickers/xxx.gif --text "图上文字与画面描述" --category panda --tags "标签1,标签2"
 ```

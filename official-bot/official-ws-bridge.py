@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import os
 import queue
 import re
@@ -223,7 +224,7 @@ def _att_list(atts, goid: str = "", is_face_msg: bool = False) -> tuple[list, li
                     if in_idx:
                         ph.append(f"[自定义表情包(已在库中): {local_p}]")
                     else:
-                        ph.append(f'[自定义表情包(新图未入库，请Read看图后顺手运行 python3 /workspace/qq-bot-persist/official-bot/make_sticker.py --add-sticker {local_p} --text "<图中文字或无>" --category "<分类>" --tags "<标签1>,<标签2>" 收纳入库): {local_p}]')
+                        ph.append(f'[自定义表情包(新图未入库，请Read看图后顺手运行 python3 {shlex.quote(str(CODE_DIR / "make_sticker.py"))} --group {shlex.quote(goid)} --add-sticker {shlex.quote(str(local_p))} --text "<图中文字或无>" --category "<分类>" --tags "<标签1>,<标签2>" 收纳入库): {local_p}]')
                 else:
                     ph.append(f"[自定义表情包: {url}]" if url else "[自定义表情包]")
             else:
@@ -595,7 +596,7 @@ def forward(payload: dict) -> str:
                 payload["plugin_errors"] = decision["errors"]
                 payload["plugin_results"] = []
                 payload["local_actions_completed"] = False
-                local_command = False
+                local_command = bool(payload.get("group_enabled", True))
             else:
                 log("plugin request denied: " + ",".join(decision["errors"]))
                 return "skipped"
@@ -612,6 +613,16 @@ def forward(payload: dict) -> str:
     if not ok and not local_command:
         log(f"gated {payload.get('post_type')} group={payload.get('group_name') or payload.get('group_openid','')[:8]}: {why}")
         return "skipped"
+    from core.reply_policy import event_context, settings, topic_tokens
+    if payload.get("post_type") == "message":
+        payload["reply_context"] = event_context(payload)
+        context = payload["reply_context"]
+        if payload.get("group_openid") and context["trigger"] == "natural":
+            limits = settings(G.load_config(payload["group_openid"]))
+            if not DeliveryStore().admit_natural(scope, context["topic_key"],
+                    topic_tokens(context["topic_text"]), limits["inbound_debounce"]):
+                log("natural burst debounced; message retained in context")
+                return "skipped"
     try:
         if payload.get("group_openid"):
             atomic_write_json(G.group_dir(payload["group_openid"]) / "last-forward.json", payload)

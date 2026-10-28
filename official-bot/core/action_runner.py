@@ -40,6 +40,8 @@ def run_actions(event: dict, actions: list[dict]) -> list[dict]:
         elif kind == "sticker.search":
             import make_sticker
             value = make_sticker.search_candidates(action["query"], group=scope)
+            value["recommendation"] = make_sticker.recommend_sticker(action["query"],
+                context=str(event.get("text_only") or ""), seed=str(event.get("delivery_id") or event.get("msg_id") or ""), group=scope)
         else:
             raise ValueError("Unknown local action")
         results.append({"type": kind, "ok": True, "result": value})

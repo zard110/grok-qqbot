@@ -1,5 +1,8 @@
 # MaxShenBi QQ 官方机器人（Grok Bot 专属版）
 
+2026-10-28 更新：[消息格式、并发去重、例程约束与许可表情素材包](official-bot/REPLY_STYLE.md)。新增 20 张 OpenMoji 反应图及 20 个改字模板，可离线安装；真实群数据仍不入 Git。
+
+
 基于 **QQ 开放平台官方机器人 API v2 + WebSocket 网关** 打造的多群拟人化 AI 机器人套件，专为 **Grok Bot** 云端沙盒环境设计。无需安装桌面版 QQ 或 NapCat，保留原有部署和 CLI 方式，提供多群独立人设、富媒体/语音/Markdown 收发、群专属知识库、**斗图表情包工坊**以及**本地零 Token 自愈守护**。
 
 ---
@@ -16,7 +19,7 @@ python3 official-bot/dashboard.py --port 8787
 ```
 
 后台仅监听本机；用终端显示的一次性登录码登录。数据库、真实群注册表、配置、聊天记录、
-图片和密钥均保留本机。消息发送的 `unknown` 状态需要核实远端结果，不能直接盲重发。
+真实群图片和密钥保留本机；仅经过许可审核的公共素材包入 Git。消息发送的 `unknown` 状态需要核实远端结果，不能直接盲重发。
 
 ## ✨ 核心特性
 
@@ -213,7 +216,7 @@ tail -n 20 /workspace/qq-bot-persist/official-bot/official-ws-bridge.log
      - 若 `at_me == true`：必回，直接正面回应群友问题（若带图片 URL 则下载识图，若带语音 ASR 则直接回答）。
      - 若 `at_me == false`：作为同好群友评估是否值得插话（有明确事实问题、求推荐、能接上高质量群梗时才回；闲聊刷屏或 120 秒内刚发过言则安静退出）。
   4. **新表情包自动入库**：若 `raw_message` 含 `[表情包(未入库): .../stickers/xxx.gif | url=...]`，下载查看图片内容后调用 `make_sticker.py --add-sticker` 归档入库。
-  5. **发送回复**：优先带上 `--msg-id "<msg_id>"` 走被动回复通道，支持文字、Markdown 或斗图工坊生成的表情包。
+  5. **去重与发送**：透传 `reply_context` 的 source/action/trigger/topic 字段，一事件一次 CLI 调用，重投不加 `--force`；按 [回复约定](official-bot/REPLY_STYLE.md) 设置格式和表情节奏。**发送回复**：优先带上 `--msg-id "<msg_id>"` 走被动回复通道，支持文字、Markdown 或斗图工坊生成的表情包。
 
 ### 2. 每小时定时例程：`QQ机器人看门狗`（容器重置零干预兜底）
 
@@ -283,7 +286,7 @@ python3 send_group.py --user-openid "<USER_OPENID>" --markdown "你好！" --msg
 ```bash
 cd /workspace/qq-bot-persist/official-bot
 
-# 1. 全库语义检索：从 140+ 现成群表情包与 25 套模板中搜索最契合当前语境的候选
+# 1. 从本群现有图库和模板搜索候选（数量以 index.json 为准）
 python3 make_sticker.py --search "拉爆 功率 吹牛"
 
 # 2. 按关键词/角色/情绪直接抽取一张现成表情包（自动避开最近用过的 25 张，支持 --prefer-gif）
@@ -295,7 +298,7 @@ python3 make_sticker.py --template husky_disdain --text "就这功率？|连我�
 # 4. 生成带动态特效的 GIF 表情包（支持 shake 震动 / zoom 冲屏 / bounce Q弹）
 python3 make_sticker.py --template pepe_smug --animate shake --text "看破不说破|继续听你吹" --out /tmp/meme.gif
 
-# 5. 将群友发的新表情包去重入库（自动校验 MD5 防止重复收录）
+# 5. 将群友发的新表情包去重入库（自动校验 SHA-256 防止重复收录）
 python3 make_sticker.py --add-sticker stickers/xxx.gif --text "熊猫头双手抱拳：大佬受我一拜" --category panda --tags "熊猫头,大佬,佩服,抱拳"
 
 # 6. 查看当前完整表情包索引与模板列表
@@ -375,7 +378,7 @@ python3 kb.py --group main list
 
 1. **`.gitignore` 白名单模式**：
    - 默认忽略所有文件（`*`），仅显式放行 `.py`、`.sh`、`.md`、模板配置与测试脚本。
-   - 所有的本地密钥（`appid`、`appsecret`、`forwarder-url`、`forwarder-key`）、群目录（`groups/<GROUP_OPENID>/`）、聊天记录（`*.jsonl`）、运行日志（`*.log`）和表情包图片均不会进入 Git。
+   - 所有的本地密钥（`appid`、`appsecret`、`forwarder-url`、`forwarder-key`）、群目录（`groups/<GROUP_OPENID>/`）、聊天记录（`*.jsonl`）、运行日志（`*.log`）和实际群表情包图片均不会进入 Git（已审核公共素材包除外）。
 2. **`tools/secret-scan.sh` 自动化扫描**：
    - 在每次 `git commit` 时自动检查暂存区（也可随时手动运行 `bash tools/secret-scan.sh --tracked` 扫描全库）。
    - 自动读取本机真实密钥文件进行字面量比对（不打印明文），并拦截任何 32 位十六进制 `openid`、9~11 位数字（QQ 号 / AppID）、Token 串、邮箱地址以及未列入白名单的 Webhook URL。

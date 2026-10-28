@@ -135,3 +135,27 @@ def append_jsonl(path: Path | str, record: dict) -> None:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
             stream.flush()
         ensure_shared_perms(path)
+
+
+def tail_jsonl(path: Path | str, count: int = 200, max_bytes: int = 1024 * 1024) -> list[dict]:
+    """Bound both disk reads and parsed history; tolerate torn trailing records."""
+    try:
+        with Path(path).open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            offset = max(0, stream.tell() - max_bytes)
+            stream.seek(offset)
+            content = stream.read(max_bytes)
+    except FileNotFoundError:
+        return []
+    lines = content.splitlines()
+    if offset and lines:
+        lines = lines[1:]  # May begin in the middle of a UTF-8 sequence or record.
+    records = []
+    for line in lines[-count:]:
+        try:
+            record = json.loads(line)
+            if isinstance(record, dict):
+                records.append(record)
+        except (ValueError, UnicodeDecodeError):
+            continue
+    return records

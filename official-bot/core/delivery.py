@@ -12,6 +12,11 @@ from pathlib import Path
 
 from .files import ensure_shared_perms
 from .settings import DATA_DIR
+from .reply_policy import denial, same_topic
+
+
+class ReplySuppressed(ValueError):
+    """An intentional policy skip; no network request has been started."""
 
 
 def stable_id(value: object) -> str:
@@ -44,6 +49,17 @@ class DeliveryStore:
                 CREATE TABLE IF NOT EXISTS outbound_parts (
                     action_id TEXT NOT NULL, part INTEGER NOT NULL, status TEXT NOT NULL,
                     detail TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(action_id, part));
+                CREATE TABLE IF NOT EXISTS reply_claims (
+                    action_id TEXT PRIMARY KEY, scope TEXT NOT NULL, created REAL NOT NULL,
+                    metadata TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS reply_scope ON reply_claims(scope,created);
+                CREATE INDEX IF NOT EXISTS reply_source ON reply_claims(scope,json_extract(metadata,'$.source'));
+                CREATE INDEX IF NOT EXISTS reply_content ON reply_claims(scope,json_extract(metadata,'$.content_hash'),created);
+                CREATE INDEX IF NOT EXISTS reply_topic ON reply_claims(scope,json_extract(metadata,'$.topic_key'),created);
+                CREATE INDEX IF NOT EXISTS outbox_scope_time ON outbox(scope,updated);
+                CREATE TABLE IF NOT EXISTS natural_topics (
+                    scope TEXT NOT NULL, topic TEXT NOT NULL, tokens TEXT NOT NULL,
+                    updated REAL NOT NULL, PRIMARY KEY(scope,topic));
             """)
             if "request_hash" not in {row[1] for row in db.execute("PRAGMA table_info(outbox)")}:
                 db.execute("ALTER TABLE outbox ADD COLUMN request_hash TEXT")
@@ -89,21 +105,48 @@ class DeliveryStore:
         with self.connect() as db:
             db.execute("UPDATE inbox SET status=?,error=?,updated=? WHERE id=?", (status, error, time.time(), identity))
 
-    def reserve_action(self, identity: str, scope: str, request_hash: str | None = None, *, force: bool = False) -> tuple[bool, dict]:
+    def reserve_action(self, identity: str, scope: str, request_hash: str | None = None, *, force: bool = False,
+                       reply_meta: dict | None = None, limits: dict | None = None) -> tuple[bool, dict]:
         now = time.time()
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone()
+            if old and (old["scope"] != scope or (request_hash is not None and old["request_hash"] != request_hash)):
+                raise ValueError("Action identity was already used for another scope or content")
+            retry = bool(old and force and old["status"] in {"unknown", "failed"})
+            if old and not retry:
+                return False, dict(old)
+            if reply_meta is not None:
+                reason = denial(db, scope, identity, reply_meta, limits, now, force)
+                if reason:
+                    raise ReplySuppressed(reason)
             added = db.execute("INSERT OR IGNORE INTO outbox(id,scope,status,created,updated,request_hash) VALUES(?,?,'pending',?,?,?)", (identity, scope, now, now, request_hash)).rowcount == 1
             row = dict(db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone())
-            if row["scope"] != scope:
-                raise ValueError("Action identity belongs to another scope")
-            if request_hash is not None and row["request_hash"] != request_hash and not force:
-                raise ValueError("Action identity was already used for different content")
-            if not added and force and row["status"] in {"unknown", "failed", "pending"}:
+            if reply_meta is not None:
+                db.execute("INSERT INTO reply_claims VALUES(?,?,?,?) ON CONFLICT(action_id) DO UPDATE SET created=excluded.created,metadata=excluded.metadata",
+                           (identity, scope, now, json.dumps(reply_meta, ensure_ascii=False)))
+            if retry:
                 db.execute("UPDATE outbox SET status='pending',updated=?,request_hash=? WHERE id=?", (now, request_hash, identity))
                 row = dict(db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone())
                 return True, row
             # Existing pending/inflight/unknown actions must not be resent blindly.
             return added, row
+
+    def admit_natural(self, scope: str, topic: str, tokens: list[str], window: float) -> bool:
+        """Leading-edge debounce: log every inbound event, forward only one burst.
+
+        This does not sleep or delay gateway ACKs. No semantic claim beyond token similarity.
+        """
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM natural_topics WHERE updated<?", (now - 86400,))
+            rows = db.execute("SELECT topic,tokens FROM natural_topics WHERE scope=? AND updated>?", (scope, now - window)).fetchall()
+            if any(row["topic"] == topic or same_topic(tokens, json.loads(row["tokens"])) for row in rows):
+                return False
+            db.execute("INSERT INTO natural_topics VALUES(?,?,?,?) ON CONFLICT(scope,topic) DO UPDATE SET tokens=excluded.tokens,updated=excluded.updated",
+                       (scope, topic, json.dumps(tokens), now))
+            return True
 
     def action_status(self, identity: str, status: str, detail=None):
         if status not in {"pending", "inflight", "sent", "failed", "unknown", "partial"}:
