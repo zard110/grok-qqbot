@@ -20,8 +20,8 @@
    - **MD5 去重入库与语义检索**：支持将群友新图去重入库（`--add-sticker`），并按情绪、角色、热梗关键词检索（`--pick` / `--search`），内置最近 25 次防重复记忆。
    - **25+ 模板动态加字 & GIF 动效**：支持二哈、柴犬、熊猫头、佩佩蛙、汤姆猫等 25 套经典底图动态排版加字，一键生成 `shake`（震动）、`zoom`（冲屏）、`bounce`（弹跳）动图。
 5. **混合双层看门狗自愈架构（零 Token 巡检 + 云端兜底）**
-   - **第一层（本地零 Token 守护 `local-watchdog.py`）**：每 120 秒在容器内静默自检，消耗 **0 LLM Token**。自动恢复丢失的 `/root/forwarder/{url,key}`、清理重复进程、拉起掉线网关；超过 8.5 分钟无心跳/ACK 信号先发 `SIGUSR1` 触发热重连，超过 11 分钟发 `SIGTERM` 彻底重启；仅当连续故障超过 **15 分钟**仍未恢复时，才通过 Webhook 发送 `watchdog_alert` 唤醒云端通知主人。
-   - **第二层（Grok Bot 每小时云端兜底例程）**：配合 `ensure-bots.sh`，即使遇到云端容器整机重置（进程与 `/root` 清空、Python 依赖丢失），也能自动重装 `websocket-client` 并恢复全部后台服务。
+   - **第一层（本地零 Token 守护 `local-watchdog.py`）**：每 120 秒在容器内静默自检，消耗 **0 LLM Token**。内置**沙盒休眠唤醒防误杀机制**（检测到容器冻结唤醒后先给网关 25 秒宽限期完成 `RESUME` 补收积压消息，且唤醒后首次恢复动作强制降级为 `SIGUSR1` 热重连而非强杀）；日常超过 8.5 分钟无心跳/ACK 信号发 `SIGUSR1` 热重连，超过 11 分钟发 `SIGTERM` 重启；仅当连续故障超过 **15 分钟**仍未恢复时，才通过 Webhook 发送 `watchdog_alert` 唤醒云端通知主人。
+   - **第二层（Grok Bot 每 5 分钟云端极速保活例程）**：全天每 5 分钟执行一次轻量级进程存活检查，防止沙盒因空闲 5 分钟被平台挂起冻结，同时在容器整机重置时自动调用 `ensure-bots.sh` 恢复全部后台服务。
 6. **白名单 Git 与预提交隐私扫描（`tools/secret-scan.sh`）**
    - `.gitignore` 采用严格白名单机制，所有密钥、`openid`、QQ 号、群聊记录、笔记与图库文件均排除在版本控制之外，配合 `secret-scan.sh` 杜绝任何敏感信息泄露。
 
@@ -231,8 +231,11 @@ cd /workspace/qq-bot-persist/official-bot
 # 查看目标群最近发送记录与 120 秒冷却状态（发消息前必查）
 python3 send_group.py --group main --recent
 
-# 被动回复群消息（推荐！使用收到消息的 msg_id，5 分钟内有效，不占主动推送额度）
-python3 send_group.py --group main --markdown "收到！这是回复内容" --msg-id "ROBOT1.0_xxx"
+# 被动回复群消息（日常文字回复默认推荐 --text 即 msg_type=0，防客户端吞长 Markdown，自动将 <qqbot-at-user> 转为 <@openid>）
+python3 send_group.py --group main --text "收到！这是回复内容" --msg-id "ROBOT1.0_xxx"
+
+# 单条消息同时发本地图片 + 真实 @（自动上传 /v2/media-images 获取 qqbot-media:// 并合成单条 msg_type=2 发送）
+python3 send_group.py --group main --image /tmp/card.png --text "<@MEMBER_OPENID> 今日战报" --msg-id "ROBOT1.0_xxx"
 
 # 引用某条具体消息并回复（使用收到消息的 ref_idx 字段）
 python3 send_group.py --group main --markdown "针对这条消息的补充" --reply-to "REFIDX_xxx" --msg-id "ROBOT1.0_xxx"

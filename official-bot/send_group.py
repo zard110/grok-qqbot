@@ -132,6 +132,37 @@ def _to_silk(path: str) -> str:
     return out
 
 
+
+def upload_markdown_image(path_str: str) -> tuple[str, int, int]:
+    """Upload local image to /v2/media-images and return (qqbot-media:// url, width, height)."""
+    import hashlib
+    from PIL import Image
+    fp = Path(path_str)
+    data = fp.read_bytes()
+    with Image.open(fp) as im:
+        w, h = im.size
+        fmt = (im.format or "PNG").lower()
+    mime = f"image/{'jpeg' if fmt in ('jpg', 'jpeg') else fmt}"
+    md5 = hashlib.md5(data).hexdigest()
+    sha1 = hashlib.sha1(data).hexdigest()
+    c1, prep = api("POST", "/v2/media-images/prepare", {
+        "file_name": fp.name,
+        "file_size": len(data),
+        "content_type": mime,
+        "md5": md5,
+        "sha1": sha1,
+    })
+    if c1 >= 300 or not isinstance(prep, dict) or "presigned_url" not in prep:
+        raise RuntimeError(f"media-images/prepare failed: {c1} {prep}")
+    req = urllib.request.Request(prep["presigned_url"], data=data, method="PUT", headers={"Content-Type": mime})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        etag = (r.headers.get("ETag") or "").strip('"')
+    c2, comp = api("POST", "/v2/media-images/complete", {"upload_id": prep["upload_id"], "md5": etag or md5})
+    if c2 >= 300 or not isinstance(comp, dict) or "url" not in comp:
+        raise RuntimeError(f"media-images/complete failed: {c2} {comp}")
+    return comp["url"], w, h
+
+
 def upload(kind: str, src: str, base: str) -> dict:
     """Upload media; returns the API response body (contains file_info). Never sends a message."""
     ft = FILE_TYPES[kind]
@@ -261,26 +292,55 @@ def main() -> None:
     # build message plan (list of payloads); file_info filled after upload
     plan: list[dict] = []
     caption_label = ""
-    if media:
+    import re as _re
+
+    def _norm_at_for_text(s: str) -> str:
+        # msg_type=0 (plain text) and msg_type=7 use <@openid> for real @ mentions
+        return _re.sub(
+            r'<qqbot-at-user\s+id=["\']?([0-9A-Fa-f]{16,})["\']?\s*/?>',
+            r"<@\1>",
+            s,
+        )
+
+    def _norm_at_for_md(s: str) -> str:
+        # msg_type=2 (markdown) uses <qqbot-at-user id="openid" /> for real @ mentions
+        return _re.sub(r"<@([0-9A-Fa-f]{16,})>", r'<qqbot-at-user id="\1" />', s)
+
+    # If sending a local image + caption that contains an @ mention (<qqbot-at-user or <@HEX>),
+    # msg_type=7 does NOT parse @ tags in group chat! Automatically upload via /v2/media-images
+    # and send as a single msg_type=2 markdown message with qqbot-media:// + <qqbot-at-user>.
+    combined_caption = args.text if args.text is not None else (args.markdown or "")
+    has_at_tag = bool(_re.search(r"<qqbot-at-user|<@[0-9A-Fa-f]{16,}>", combined_caption))
+    if media and media[0][0] == "image" and has_at_tag and Path(media[0][1]).exists() and not args.dry_run:
+        norm_caption = _norm_at_for_md(combined_caption)
+        murl, mw, mh = upload_markdown_image(media[0][1])
+        md_content = f"{norm_caption}\n![image #{mw}px #{mh}px]({murl})"
+        md = {"msg_type": 2, "markdown": {"content": md_content}}
+        if keyboard:
+            md["keyboard"] = keyboard
+        plan.append(md)
+        media = []
+        caption_label = md_content
+    elif media:
         mp: dict = {"msg_type": 7, "media": {"file_info": "<upload>"}}
         if args.text is not None:
-            mp["content"] = args.text  # text caption rides in the same message
+            mp["content"] = _norm_at_for_text(args.text)  # text caption rides in the same message
         else:
             mp["content"] = " "
         plan.append(mp)
         if args.markdown is not None:
-            md = {"msg_type": 2, "markdown": {"content": args.markdown}}
+            md = {"msg_type": 2, "markdown": {"content": _norm_at_for_md(args.markdown)}}
             if keyboard:
                 md["keyboard"] = keyboard
             plan.append(md)  # caption as a separate message right after the media
         caption_label = args.text if args.text is not None else (args.markdown or "")
     elif args.markdown is not None:
-        md = {"msg_type": 2, "markdown": {"content": args.markdown}}
+        md = {"msg_type": 2, "markdown": {"content": _norm_at_for_md(args.markdown)}}
         if keyboard:
             md["keyboard"] = keyboard
         plan.append(md)
     else:
-        plan.append({"msg_type": 0, "content": args.text})
+        plan.append({"msg_type": 0, "content": _norm_at_for_text(args.text)})
 
     if args.dry_run:
         print(json.dumps({"dry_run": True, "group": goid, "sent_log": SENT_LOG, "target": base + "/messages", "plan": plan, "reply_to": args.reply_to, "msg_id": args.msg_id, "event_id": args.event_id}, ensure_ascii=False, indent=2))

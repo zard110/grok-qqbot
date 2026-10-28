@@ -34,6 +34,7 @@
 - 自动检查 `/root/forwarder/url`、`/root/forwarder/key` 与 `websocket-client` 依赖，缺失时自动从持久化目录恢复或补装。
 - 确保全局只有 **1 个** `official-ws-bridge.py` 实例运行（挂掉则拉起，多开则清理旧进程）。
 - 检查 `official-ws-bridge.log` 中的活跃信号（`ack ok` / `READY` / `RESUMED` / `recv`）：
+  - **沙盒休眠唤醒防误杀**：若检测到两次巡检间隔异常（`> 210s`，说明容器刚从平台休眠中唤醒），先给予网关 **25 秒宽限期**自动完成 `op=6 RESUME` 补收积压消息；唤醒后若仍超时，首次动作强制降级为 `SIGUSR1` 热重连而非 `SIGTERM` 强杀，确保会话与 `last_seq` 不丢失。
   - 超过 **8.5 分钟**无活跃信号：向网关进程发送 `SIGUSR1` 触发热重连（优先 `RESUME`）。
   - 超过 **11 分钟**仍未恢复：发送 `SIGTERM` 终止网关进程，由守护脚本干净重启。
   - 仅当连续故障超过 **15 分钟**仍无法自愈时，才向 Grok Bot Webhook 发送 `post_type="watchdog_alert"` 告警（每 30 分钟最多 1 次），唤醒云端修复并通知主人。
@@ -84,14 +85,13 @@ python3 /workspace/qq-bot-persist/official-bot/make_sticker.py \
 更多高级参数（引用回复、语音条、视频、互动按钮、消息撤回）详见 **[USAGE.md](USAGE.md)**。
 
 ```bash
-# 1. 被动回复（强烈推荐，利用收到消息的 5 分钟 msg_id 窗口，不消耗主动推送额度）
-python3 /workspace/qq-bot-persist/official-bot/send_group.py \
-  --markdown $'**标题**\n正文内容' \
-  --msg-id 'ROBOT1.0_...'
-
-# 2. 发送纯文本被动回复
+# 1. 发送纯文本被动回复（日常群聊默认推荐 msg_type=0，防客户端静默吞消息，且自动将 <qqbot-at-user> 转为 <@openid>）
 python3 /workspace/qq-bot-persist/official-bot/send_group.py \
   --text '你好！' --msg-id 'ROBOT1.0_...'
+
+# 2. 发送本地图片 + 真实 @（自动走 /v2/media-images 上传 qqbot-media:// 并合成单条 msg_type=2 消息）
+python3 /workspace/qq-bot-persist/official-bot/send_group.py \
+  --image /tmp/cover.png --text '<@MEMBER_OPENID> 战报来啦！' --msg-id 'ROBOT1.0_...'
 
 # 3. 发送图片或表情包（支持 jpg / png / gif）
 python3 /workspace/qq-bot-persist/official-bot/send_group.py \

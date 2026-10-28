@@ -168,67 +168,83 @@ def send_webhook_alert(reason: str, tail_lines: list[str], state: dict) -> None:
 
 def check_once(state: dict) -> None:
     now = time.time()
-    ensure_forwarder_files()
-    pids = get_bridge_pids()
+    last_check_ts = float(state.get("last_check_ts", 0.0) or 0.0)
+    vm_woke = False
+    try:
+        ensure_forwarder_files()
+        if last_check_ts > 0 and (now - last_check_ts) > (CHECK_INTERVAL + 90):
+            vm_woke = True
+            wlog(
+                f"VM wake detected (loop gap {int(now - last_check_ts)}s); "
+                "waiting 25s for bridge auto-RESUME before checking staleness"
+            )
+            time.sleep(25)
+            now = time.time()
 
-    if len(pids) > 1:
-        keep = pids[-1]
-        for p in pids[:-1]:
-            try:
-                os.kill(p, signal.SIGTERM)
-                wlog(f"killed duplicate bridge pid={p} (keeping {keep})")
-            except Exception:
-                pass
-        pids = [keep]
-
-    if not pids:
-        wlog("bridge not running! starting...")
-        start_bridge()
-        time.sleep(6)
         pids = get_bridge_pids()
+
+        if len(pids) > 1:
+            keep = pids[-1]
+            for p in pids[:-1]:
+                try:
+                    os.kill(p, signal.SIGTERM)
+                    wlog(f"killed duplicate bridge pid={p} (keeping {keep})")
+                except Exception:
+                    pass
+            pids = [keep]
+
         if not pids:
-            age, _, tail = parse_bridge_log(now)
-            send_webhook_alert("official-ws-bridge 进程无法拉起", tail, state)
+            wlog("bridge not running! starting...")
+            start_bridge()
+            time.sleep(6)
+            now = time.time()
+            pids = get_bridge_pids()
+            if not pids:
+                age, _, tail = parse_bridge_log(now)
+                send_webhook_alert("official-ws-bridge 进程无法拉起", tail, state)
+            else:
+                wlog(f"bridge started pid={pids[0]}")
+            return
+
+        pid = pids[0]
+        age, fatals, tail = parse_bridge_log(now)
+
+        if len(fatals) >= 4 and age > 180:
+            send_webhook_alert(f"bridge 连续出现鉴权/会话错误 ({len(fatals)} 次)", tail, state)
+            return
+
+        if age <= STALE_USR1_SEC:
+            state["unhealthy_since"] = 0.0
+            wlog(f"ok pid={pid} last_live={int(age)}s ago")
+            return
+
+        if vm_woke or not state.get("unhealthy_since"):
+            state["unhealthy_since"] = now
+
+        unhealthy_dur = now - state["unhealthy_since"]
+
+        if age < STALE_KILL_SEC or vm_woke:
+            reason_tag = "first check after VM wake" if vm_woke else f"> {STALE_USR1_SEC}s"
+            wlog(f"stale live signal ({int(age)}s {reason_tag}), sending SIGUSR1 to pid={pid}")
+            try:
+                os.kill(pid, signal.SIGUSR1)
+            except Exception as e:
+                wlog(f"SIGUSR1 failed: {e}")
         else:
-            wlog(f"bridge started pid={pids[0]}")
-        return
+            wlog(f"still stale ({int(age)}s >= {STALE_KILL_SEC}s), killing pid={pid} so wrapper restarts it")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception as e:
+                wlog(f"SIGTERM failed: {e}")
 
-    pid = pids[0]
-    age, fatals, tail = parse_bridge_log(now)
-
-    if len(fatals) >= 4 and age > 180:
-        send_webhook_alert(f"bridge 连续出现鉴权/会话错误 ({len(fatals)} 次)", tail, state)
-        return
-
-    if age <= STALE_USR1_SEC:
-        state["unhealthy_since"] = 0.0
-        wlog(f"ok pid={pid} last_live={int(age)}s ago")
-        return
-
-    if not state.get("unhealthy_since"):
-        state["unhealthy_since"] = now
-
-    unhealthy_dur = now - state["unhealthy_since"]
-
-    if age < STALE_KILL_SEC:
-        wlog(f"stale live signal ({int(age)}s > {STALE_USR1_SEC}s), sending SIGUSR1 to pid={pid}")
-        try:
-            os.kill(pid, signal.SIGUSR1)
-        except Exception as e:
-            wlog(f"SIGUSR1 failed: {e}")
-    else:
-        wlog(f"still stale ({int(age)}s >= {STALE_KILL_SEC}s), killing pid={pid} so wrapper restarts it")
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except Exception as e:
-            wlog(f"SIGTERM failed: {e}")
-
-    if unhealthy_dur >= ALERT_FAIL_SEC:
-        send_webhook_alert(
-            f"official-ws-bridge 已连续 {int(unhealthy_dur)}s 无 QQ 响应，本地 USR1/重启均未恢复",
-            tail,
-            state,
-        )
+        if unhealthy_dur >= ALERT_FAIL_SEC:
+            send_webhook_alert(
+                f"official-ws-bridge 已连续 {int(unhealthy_dur)}s 无 QQ 响应，本地 USR1/重启均未恢复",
+                tail,
+                state,
+            )
+    finally:
+        state["last_check_ts"] = now
 
 
 def main() -> None:
