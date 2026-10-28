@@ -29,6 +29,24 @@ class ReplyPolicyTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             self.assertEqual(sum(pool.map(attempt, range(12))), 1)
 
+    def test_concurrent_legacy_routines_cannot_force_same_source(self):
+        def attempt(i):
+            try:
+                return self.reserve(str(i), "legacy", "event", text=str(i), force=True)[0]
+            except ReplySuppressed:
+                return False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            self.assertEqual(sum(pool.map(attempt, range(12))), 1)
+
+    def test_legacy_source_guard_survives_uncertain_or_successful_send(self):
+        self.reserve("first", "legacy", "same")
+        for state in ("pending", "inflight", "sent", "partial", "unknown"):
+            with self.subTest(state=state):
+                self.store.action_status("first", state)
+                with self.assertRaisesRegex(ReplySuppressed, "source_event_already_claimed"):
+                    self.reserve("other", "legacy", "same", text="other", force=True)
+        self.assertTrue(self.reserve("other-scope", "legacy", "same", scope="g2")[0])
+
     def test_source_survives_unknown_and_arbitrary_age(self):
         self.reserve("first", "at", "source")
         self.store.action_status("first", "unknown")
@@ -92,6 +110,16 @@ class ReplyPolicyTests(unittest.TestCase):
         self.assertEqual(event_context({**event, "at_me": True})["trigger"], "at")
         self.assertEqual(event_context({**event, "text_only": "/记忆"})["trigger"], "command")
         self.assertEqual(event_context({**event, "text_only": "哈哈"})["action_id"], event_context(event)["action_id"])
+
+    def test_requests_without_question_marks_are_questions(self):
+        for text in ("拿其它ui设计的skill对比一下", "来个详细的对比，结合x上的评价", "帮我给这5个打个分",
+                     "再来一个", "试试这个", "看看这个界面", "推荐几种", "解释一下", "说说差别", "讲讲原理",
+                     "分析一下", "做个评测", "哪个比较合适", "还有哪些", "大概多少", "能不能换一个", "这样可以吗"):
+            with self.subTest(text=text):
+                self.assertEqual(event_context({"text_only": text})["trigger"], "question")
+        self.assertEqual(event_context({"text_only": "这个界面比较好看"})["trigger"], "natural")
+        self.assertEqual(event_context({"text_only": "推荐一下", "at_me": True})["trigger"], "at")
+        self.assertEqual(event_context({"text_only": "/记忆 分析"})["trigger"], "command")
 
     def test_invalid_policy_is_rejected(self):
         for value in (float("nan"), -1, True, "120"):

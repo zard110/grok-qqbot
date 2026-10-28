@@ -8,6 +8,15 @@ DEFAULTS = {"markdown_verified": False, "tables_verified": False,
             "fallback_on_reject": True, "markdown_reject_codes": []}
 TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*\|[\s|:\-]*$")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})([\w+-]*)\s*$")
+DECORATION = re.compile(r"^\s{0,3}#{1,6}\s+|\*\*[^*\n]+\*\*|(?<!\w)__[^_\n]+__(?!\w)", re.MULTILINE)
+
+
+def _plain_inline(line: str) -> str:
+    line = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"图片：\1（\2）", line)
+    line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1（\2）", line)
+    line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+    line = re.sub(r"(?<!\w)__([^_]+)__(?!\w)", r"\1", line)
+    return re.sub(r"`([^`]+)`", r"\1", line)
 
 
 def policy(config: dict | None = None) -> dict:
@@ -41,20 +50,16 @@ def plain_text(content: str) -> str:
             index += 1
             continue
         if index + 1 < len(lines) and "|" in line and TABLE_RULE.match(lines[index + 1]):
-            headers = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            headers = [_plain_inline(cell.strip()) for cell in line.strip().strip("|").split("|")]
             index += 2
             while index < len(lines) and "|" in lines[index] and lines[index].strip():
-                cells = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                cells = [_plain_inline(cell.strip()) for cell in lines[index].strip().strip("|").split("|")]
                 output.append("；".join(f"{headers[n] if n < len(headers) else '补充'}：{cell}" for n, cell in enumerate(cells)))
                 index += 1
             continue
         line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
         line = re.sub(r"^\s*>\s?", "", line)
-        line = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"图片：\1（\2）", line)
-        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1（\2）", line)
-        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
-        line = re.sub(r"`([^`]+)`", r"\1", line)
-        output.append(line)
+        output.append(_plain_inline(line))
         index += 1
     return "\n".join(output).strip()
 
@@ -98,7 +103,7 @@ def prepare(content: str, requested: str, config=None, *, mode=None, max_chars=N
     if table and len(content) > settings["max_chars"] and chosen == "markdown":
         chosen = "plain"
         warnings.append("Long table converted to labeled rows before splitting")
-    if chosen == "plain" and (requested == "markdown" or mode == "auto"):
+    if chosen == "plain" and (requested == "markdown" or mode == "auto" or table or code or DECORATION.search(content)):
         content = plain_text(content)
     chunks = split_content(content, settings["max_chars"], markdown=chosen == "markdown")
     if len(chunks) > settings["max_parts"]:

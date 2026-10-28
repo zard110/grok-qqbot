@@ -106,7 +106,7 @@ class DeliveryStore:
             db.execute("UPDATE inbox SET status=?,error=?,updated=? WHERE id=?", (status, error, time.time(), identity))
 
     def reserve_action(self, identity: str, scope: str, request_hash: str | None = None, *, force: bool = False,
-                       reply_meta: dict | None = None, limits: dict | None = None) -> tuple[bool, dict]:
+                       reply_meta: dict | None = None, limits: dict | None = None, cooldown_active: bool = False) -> tuple[bool, dict]:
         now = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -120,6 +120,8 @@ class DeliveryStore:
                 reason = denial(db, scope, identity, reply_meta, limits, now, force)
                 if reason:
                     raise ReplySuppressed(reason)
+            if cooldown_active and not force:
+                raise ReplySuppressed("Group cooldown active")
             added = db.execute("INSERT OR IGNORE INTO outbox(id,scope,status,created,updated,request_hash) VALUES(?,?,'pending',?,?,?)", (identity, scope, now, now, request_hash)).rowcount == 1
             row = dict(db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone())
             if reply_meta is not None:

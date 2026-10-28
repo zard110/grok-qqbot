@@ -1,7 +1,7 @@
 # MaxShenBi 官方机器人：send_group.py 用法 + 收到的消息字段（2026-10-28 更新）
 
 脚本：`python3 /workspace/qq-bot-persist/official-bot/send_group.py ...`
-旧 CLI 保留按群 120 秒冷却；新例程使用 `--trigger` 区分自然闲聊、问句与 @ 回复。`--recent` 仅辅助观察，最终以发送器的事务校验为准。例程不得自动加 `--force`。
+旧 CLI 的 --msg-id 会从本群匹配历史补全回复类型；找不到时保留 120 秒冷却。显式 --trigger 仍可指定自然闲聊、问句与 @。有来源 ID 时一律执行跨例程互斥。`--recent` 仅辅助观察，最终以发送器的事务校验为准。例程不得自动加 `--force`。
 
 新增分层实现见 [ARCHITECTURE.md](ARCHITECTURE.md)，迁移见 [MIGRATION.md](MIGRATION.md)。
 `--force` 允许人工重试同内容 unknown/failed 并绕过普通冷却；sent/partial 以及其他例程已占用的来源仍受保护。
@@ -10,7 +10,7 @@
 
 新格式、去重、斗图策略和可复制例程约束见 [REPLY_STYLE.md](REPLY_STYLE.md)。
 
-新增参数：`--format auto|plain|markdown`、`--max-chars`、`--max-parts`、`--source-event-id`、`--trigger legacy|natural|at|question|command`、`--topic-text`、`--topic-key`、`--sticker`。默认不变；自动模式按群验证能力，长消息有界分段、超限报错，不截断。
+新增参数：`--format auto|plain|markdown`、`--max-chars`、`--max-parts`、`--source-event-id`、`--trigger legacy|natural|at|question|command`、`--topic-text`、`--topic-key`、`--sticker`。默认 --text 仍为纯文本，但自动清洗表格、围栏、标题/加粗；--format auto 才按群验证能力升级类型。长消息有界分段、超限报错，不截断。
 
 ## 一、发送选项
 
@@ -95,3 +95,5 @@ sent-log.jsonl 每次发送记一行：`ts, at, scope(group/c2c), kind(text/mark
 
 ### 私聊 `post_type=message, message_type=private`
 - `user_openid`、`raw_message`、`attachments`、`msg_id`。回复：`send_group.py --user-openid <user_openid> --msg-id <msg_id> --markdown "..."`。
+
+图库与生成图默认不画英文署名页脚，来源/许可保存在索引与侧车。需画面署名时用 `make_sticker.py --embed-credit-footer`；旧素材包执行 `install_sticker_pack.py --group zwift` 可更新为无页脚版本（不删除旧文件或本土图库）。

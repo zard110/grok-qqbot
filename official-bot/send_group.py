@@ -219,13 +219,12 @@ def main() -> None:
     ap.add_argument("--format", choices=["auto", "plain", "markdown"], help="presentation mode; auto uses group-verified capabilities")
     ap.add_argument("--max-chars", type=int, help="part size 120..2000 (default 1000)")
     ap.add_argument("--max-parts", type=int, help="maximum parts 1..5 (default 3); never silently truncates")
-    ap.add_argument("--trigger", choices=["legacy", "natural", "at", "question", "command"], default="legacy")
+    ap.add_argument("--trigger", choices=["legacy", "natural", "at", "question", "command"], help="infer from matching --msg-id history when omitted; otherwise legacy")
     ap.add_argument("--source-event-id", help="stable source identity shared by all routines handling an event")
     ap.add_argument("--topic-text", default="", help="incoming topic, not the generated reply")
     ap.add_argument("--topic-key", default="", help="stable topic id when supplied by the bridge")
     ap.add_argument("--sticker", action="store_true", help="enforce sticker pacing and a short natural delay")
     args = ap.parse_args()
-    policy_plugin = args.plugin_id or {"natural": "natural_reply", "question": "natural_reply", "at": "reply", "command": "command"}.get(args.trigger)
 
     goid = None if args.user_openid else G.resolve(args.group or args.group_openid)
     set_target_files(goid, args.user_openid)
@@ -239,6 +238,16 @@ def main() -> None:
         tok = get_token()
         print(json.dumps({"ok": True, "group_openid": goid, "token_available": bool(tok)}, ensure_ascii=False, indent=2))
         return
+    inferred_context = None
+    if goid and args.msg_id and args.trigger is None and not args.topic_text and not args.recall:
+        from core.reply_context import recover
+        inferred_context = recover(G.group_dir(goid), goid, args.msg_id)
+        if inferred_context:
+            args.trigger = inferred_context["trigger"]
+            args.topic_text = inferred_context["topic_text"]
+            args.topic_key = args.topic_key or inferred_context["topic_key"]
+    args.trigger = args.trigger or "legacy"
+    policy_plugin = args.plugin_id or {"natural": "natural_reply", "question": "natural_reply", "at": "reply", "command": "command"}.get(args.trigger)
     cfg = {}
     if goid:
         cfg = G.load_config(goid)
@@ -362,15 +371,15 @@ def main() -> None:
         ap.error("media and caption exceed maximum message parts; shorten the reply")
 
     if args.dry_run:
-        print(json.dumps({"dry_run": True, "group": goid, "sent_log": SENT_LOG, "target": base + "/messages", "plan": plan, "format_warnings": format_warnings, "reply_to": args.reply_to, "msg_id": args.msg_id, "event_id": args.event_id}, ensure_ascii=False, indent=2))
+        print(json.dumps({"dry_run": True, "group": goid, "sent_log": SENT_LOG, "target": base + "/messages", "plan": plan, "format_warnings": format_warnings, "trigger": args.trigger, "context_recovered": bool(inferred_context), "reply_to": args.reply_to, "msg_id": args.msg_id, "event_id": args.event_id}, ensure_ascii=False, indent=2))
         return
 
     media_identity = []
     for kind, source in media:
         media_identity.append([kind, source if source.startswith(("http://", "https://")) else hashlib.sha256(read_local(source)).hexdigest()])
-    trigger = args.source_event_id or args.msg_id or args.event_id or (time.time_ns() if args.force else int(time.time() // WINDOW))
+    trigger = args.msg_id or args.source_event_id or args.event_id or (time.time_ns() if args.force else int(time.time() // WINDOW))
     action_id = stable_id([base, args.action_id]) if args.action_id else stable_id([base, trigger, plan, media_identity, args.reply_to])
-    meta = reply_policy.metadata(args.trigger, args.source_event_id or args.msg_id or args.event_id,
+    meta = reply_policy.metadata(args.trigger, args.msg_id or args.source_event_id or args.event_id,
         message_format.plain_text(combined_caption), media_identity, topic_text=args.topic_text,
         topic_key=args.topic_key, sticker=args.sticker)
     if args.sticker and media_identity:
@@ -378,13 +387,12 @@ def main() -> None:
     limits = reply_policy.settings(cfg)
     store = DeliveryStore()
     with file_lock(LOCK, timeout=180):
-        if scope == "group" and args.trigger == "legacy" and (recent_sends() or store.recent_actions(base)) and not args.force:
-            print(json.dumps({"skipped": True, "reason": "Group cooldown active", "recent": recent_sends()}))
-            raise SystemExit(3)
+        legacy_cooldown = bool(scope == "group" and args.trigger == "legacy" and not args.force
+                               and (recent_sends() or store.recent_actions(base)))
         try:
             reserved, previous = store.reserve_action(action_id, base,
                 stable_id([plan, media_identity, args.reply_to, args.msg_id, args.event_id]),
-                force=bool(args.force), reply_meta=meta, limits=limits)
+                force=bool(args.force), reply_meta=meta, limits=limits, cooldown_active=legacy_cooldown)
         except ReplySuppressed as error:
             print(json.dumps({"skipped": True, "reason": str(error), "action_id": action_id}))
             raise SystemExit(3)

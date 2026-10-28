@@ -12,12 +12,14 @@ from .files import atomic_write_bytes, atomic_write_json, atomic_write_text, con
 PACK = Path(__file__).resolve().parents[1] / "assets" / "openmoji-reactions"
 
 
-def attribution_frame(image: Image.Image, record: dict) -> Image.Image:
-    """Keep a legible credit with shared images, including edited/animated output."""
-    width = max(360, image.width)
-    canvas = Image.new("RGB", (width, image.height + 48), "white")
+def attribution_frame(image: Image.Image, record: dict, *, embed_credit_footer: bool = False) -> Image.Image:
+    """Flatten transparency; pixel attribution is an explicit presentation option."""
+    width = max(360, image.width) if embed_credit_footer else image.width
+    canvas = Image.new("RGB", (width, image.height + (48 if embed_credit_footer else 0)), "white")
     rgba = image.convert("RGBA")
     canvas.paste(rgba, ((width - image.width) // 2, 0), rgba)
+    if not embed_credit_footer:
+        return canvas
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default(size=11)
     draw.text((7, image.height + 4), "OpenMoji contributors | CC BY-SA 4.0 | " + record.get("codepoint", ""), fill="black", font=font)
@@ -45,7 +47,7 @@ def verified_assets(pack: Path = PACK):
     return assets
 
 
-def install(destination: Path, pack: Path = PACK) -> dict:
+def install(destination: Path, pack: Path = PACK, *, embed_credit_footer: bool = False) -> dict:
     assets = verified_assets(pack)  # Validate the entire pack before publishing files.
     license_text = (pack / "LICENSE.txt").read_text(encoding="utf-8")
     with file_lock(destination / ".library.lock"):
@@ -54,31 +56,36 @@ def install(destination: Path, pack: Path = PACK) -> dict:
         ready = data.setdefault("ready_stickers", [])
         templates = data.setdefault("templates", {})
         licenses = data.setdefault("template_licenses", {})
-        added = 0
+        added, updated = 0, 0
         for record, content in assets:
             template = record["template"]
             atomic_write_bytes(confined_path(destination, "templates/" + template + ".png"), content)
             templates.setdefault(template, record["description"] + "；" + "、".join(record["tags"]))
             licenses[template] = record
-            # Ready-to-send copy embeds attribution so the credit travels with it.
+            # Keep provenance even when no credit is painted onto the pixels.
             buffer = io.BytesIO()
             with Image.open(io.BytesIO(content)) as picture:
-                attribution_frame(picture, record).save(buffer, format="PNG")
+                attribution_frame(picture, record, embed_credit_footer=embed_credit_footer).save(buffer, format="PNG")
             shared = buffer.getvalue()
             digest = hashlib.sha256(shared).hexdigest()
             filename = digest + ".png"
             atomic_write_bytes(confined_path(destination, filename), shared)
-            existing = next((x for x in ready if x.get("sha256") == digest), None)
+            existing = next((x for x in ready if x.get("sha256") == digest or (
+                x.get("source") == "openmoji-reactions" and
+                (x.get("source_sha256") == record["sha256"] or x.get("id") == record["id"]))), None)
             fields = {**record, "file": filename, "sha256": digest, "source_sha256": record["sha256"],
                       "text": record["description"], "category": "openmoji", "is_gif": False,
-                      "source": "openmoji-reactions", "modified": True, "changes": "White background and visible attribution footer"}
+                      "source": "openmoji-reactions", "modified": True, "embed_credit_footer": embed_credit_footer,
+                      "changes": "White background" + (" and visible attribution footer" if embed_credit_footer else "")}
+            atomic_write_json(destination / (filename + ".license.json"), {**fields, "output_sha256": digest})
             if existing is None:
                 ready.append(fields)
                 added += 1
             else:
+                updated += existing.get("sha256") != digest
                 existing.update({key: value for key, value in fields.items() if key not in {"text", "tags"}})
         data["summary"] = {"total_ready_stickers": len(ready), "template_count": len(templates)}
         atomic_write_json(path, data)
         atomic_write_text(destination / "OPENMOJI-LICENSE.txt", license_text)
         atomic_write_json(destination / "openmoji-sources.json", [row for row, _ in assets])
-    return {"ok": True, "added": added, "pack_assets": len(assets), "templates": len(templates), "directory": str(destination)}
+    return {"ok": True, "added": added, "updated": updated, "pack_assets": len(assets), "templates": len(templates), "directory": str(destination)}

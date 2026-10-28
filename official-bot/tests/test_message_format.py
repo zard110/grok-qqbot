@@ -8,9 +8,24 @@ from core.message_format import prepare, plain_text, may_fallback, split_content
 class FormatTests(unittest.TestCase):
     def test_plain_default_and_auto_capability_gate(self):
         text = "## 结论\n\n- 一\n- 二"
-        self.assertEqual(prepare(text, "plain")[0][0]["content"], text)
+        self.assertEqual(prepare(text, "plain")[0][0]["content"], "结论\n\n- 一\n- 二")
         self.assertNotIn("##", prepare(text, "plain", mode="auto")[0][0]["content"])
         self.assertEqual(prepare(text, "plain", {"message_format": {"markdown_verified": True}}, mode="auto")[0][0]["msg_type"], 2)
+
+    def test_legacy_plain_cleans_tables_code_and_decorations(self):
+        cases = [
+            ("| **方案** | 评分 |\n|---|---|\n| A | **5** |", "方案：A；评分：5"),
+            ("```python\nprint('**原样代码**')\n```", "代码（python）：\n    print('**原样代码**')"),
+            ("## 结论\n**优秀**，__推荐__", "结论\n优秀，推荐"),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                payload = prepare(text, "plain")[0][0]
+                self.assertEqual(payload["msg_type"], 0)
+                self.assertEqual(payload["content"], expected)
+        text = "  普通消息：a ** b，a | b，#话题，snake__name  "
+        self.assertEqual(prepare(text, "plain")[0][0]["content"], text)
+        self.assertEqual(prepare("**加粗**", "markdown")[0][0]["msg_type"], 2)
 
     def test_table_and_code_require_separate_verification(self):
         table = "| 方案 | 成本 |\n| --- | --- |\n| A | 20 |\n| B | 30 |"

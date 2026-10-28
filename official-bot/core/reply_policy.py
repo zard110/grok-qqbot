@@ -9,6 +9,8 @@ import unicodedata
 DEFAULTS = {"natural_cooldown": 120, "question_cooldown": 10,
             "content_window": 300, "topic_window": 600, "inbound_debounce": 12,
             "sticker_cooldown": 45, "sticker_hourly_limit": 6}
+QUESTION = re.compile(r"[?？]|请问|怎么|如何|为什么|有没有|谁知道|哪个|哪些|多少|能不能|可不可以|可以吗|行不行|是不是|要不要")
+REQUEST = re.compile(r"对比|比较(?!好|多|少|大|小|高|低|快|慢|喜欢|满意)|看看|评测|打(?:个)?分|分析|推荐|试试|再来|解释|说说|讲讲")
 
 
 def settings(config=None):
@@ -48,7 +50,7 @@ def same_topic(left, right) -> bool:
 def event_context(event: dict) -> dict:
     text = str(event.get("text_only") or event.get("text") or event.get("raw_message") or "")
     trigger = "at" if event.get("at_me") else "command" if text.strip().startswith("/") else "question" if (
-        "?" in text or "？" in text or re.match(r"\s*(请问|怎么|如何|为什么|有没有|谁知道)", text)) else "natural"
+        QUESTION.search(text) or REQUEST.search(text)) else "natural"
     source = str(event.get("msg_id") or event.get("message_id") or event.get("event_id") or event.get("delivery_id") or "")
     tokens = topic_tokens(text)
     return {"source_event_id": source, "trigger": trigger, "topic_key": digest(tokens) if tokens else "",
@@ -67,7 +69,7 @@ def metadata(trigger, source, text, media, *, topic_text="", topic_key="", stick
 
 def denial(db, scope, action_id, meta, limits, now, force=False):
     """Called inside the outbox reservation transaction, never after network I/O."""
-    if meta["source"] and meta["trigger"] != "legacy":
+    if meta["source"]:
         claimed = db.execute("""SELECT 1 FROM reply_claims r JOIN outbox o ON o.id=r.action_id
             WHERE r.scope=? AND json_extract(r.metadata,'$.source')=? AND r.action_id!=?
             AND o.status IN ('pending','inflight','sent','partial','unknown') LIMIT 1""",

@@ -252,6 +252,7 @@ def make_meme(
     out_path: str,
     animate: str | None = None,
     category: str | None = None,
+    embed_credit_footer: bool = False,
 ) -> tuple[str, str]:
     chosen_tpl = choose_template(template, category=category)
     tpl_file = _paths().templates / f"{chosen_tpl}.png"
@@ -268,7 +269,8 @@ def make_meme(
     def provenance(out):
         if license_record:
             atomic_write_json(Path(str(out) + ".license.json"), {**license_record,
-                "modified": True, "changes": "Custom caption/layout" + (" and animation" if animate else ""),
+                "modified": True, "changes": "Custom caption/layout" + (" and animation" if animate else "") + (" and visible attribution footer" if embed_credit_footer else ""),
+                "embed_credit_footer": embed_credit_footer,
                 "output_sha256": hashlib.sha256(out.read_bytes()).hexdigest()})
     lines = parse_lines(text)
     W = 300
@@ -280,7 +282,7 @@ def make_meme(
     if not animate:
         buffer = io.BytesIO()
         if license_record:
-            base_canvas = attribution_frame(base_canvas, license_record)
+            base_canvas = attribution_frame(base_canvas, license_record, embed_credit_footer=embed_credit_footer)
         base_canvas.save(buffer, format="PNG" if out.suffix.lower() == ".png" else "JPEG", quality=92)
         atomic_write_bytes(out, buffer.getvalue())
         provenance(out)
@@ -341,7 +343,7 @@ def make_meme(
             frame = base_canvas.copy()
 
         if license_record:
-            frame = attribution_frame(frame, license_record)
+            frame = attribution_frame(frame, license_record, embed_credit_footer=embed_credit_footer)
         # Quantize frame for clean compact GIF
         frames.append(frame.quantize(colors=128, method=Image.Quantize.MEDIANCUT))
 
@@ -635,6 +637,7 @@ def main() -> None:
     ap.add_argument("--context", default="", help="recent conversation (current query has higher weight)")
     ap.add_argument("--previous-tag", default="", help="previous reaction mood for a complementary reply chain")
     ap.add_argument("--seed", default="", help="source event identity for stable selection on retries")
+    ap.add_argument("--embed-credit-footer", action="store_true", help="paint an optional credit footer; license sidecars are always retained")
     args = ap.parse_args()
     with use_group(args.group):
         run_cli(args, ap)
@@ -676,6 +679,7 @@ def run_cli(args, ap) -> None:
         args.out,
         animate=args.animate,
         category=args.category,
+        embed_credit_footer=args.embed_credit_footer,
     )
     print(json.dumps({
         "ok": True,

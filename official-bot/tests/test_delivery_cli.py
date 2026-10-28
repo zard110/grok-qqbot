@@ -138,3 +138,65 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(delay.call_count, 1)
         self.assertGreaterEqual(delay.call_args.args[0], .7)
         self.assertLess(delay.call_args.args[0], 1.8)
+
+    def history(self, message_id, *, at_me=False, text="拿其它ui设计的skill对比一下", raw=False):
+        group = self.root / "group"
+        group.mkdir(exist_ok=True)
+        if raw:
+            event = {"t": "GROUP_AT_MESSAGE_CREATE" if at_me else "GROUP_MESSAGE_CREATE",
+                     "d": {"group_openid": "A" * 32, "id": message_id, "content": text}}
+            with (group / "last-events.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        else:
+            event = {"msg_id": message_id, "group_openid": "A" * 32, "at_me": at_me, "text_only": text}
+            (group / "last-forward.json").write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
+
+    def test_legacy_text_cleans_markdown_without_format_flag(self):
+        code, result = self.run_cli("--text", "| **方案** | 评分 |\n|---|---|\n| A | 5 |", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["plan"], [{"msg_type": 0, "content": "方案：A；评分：5"}])
+
+    def test_legacy_msg_id_guards_source_even_with_force_and_different_action(self):
+        self.assertEqual(self.run_cli("--text", "first", "--msg-id", "source", "--action-id", "one", "--force")[0], 0)
+        code, result = self.run_cli("--text", "different", "--msg-id", "source", "--source-event-id", "alternate", "--action-id", "two", "--force")
+        self.assertEqual(code, 3)
+        self.assertEqual(result["reason"], "source_event_already_claimed")
+        code, result = self.run_cli("--text", "different again", "--msg-id", "source", "--action-id", "three")
+        self.assertEqual((code, result["reason"]), (3, "source_event_already_claimed"))
+        code, result = self.run_cli("--text", "another event", "--msg-id", "other", "--action-id", "four")
+        self.assertEqual((code, result["reason"]), (3, "Group cooldown active"))
+        self.assertEqual(self.api.call_count, 1)
+
+    def test_old_cli_recovers_at_and_question_during_natural_cooldown(self):
+        self.assertEqual(self.run_cli("--text", "闲聊回复", "--trigger", "natural", "--source-event-id", "initial")[0], 0)
+        self.history("at", at_me=True)
+        self.assertEqual(self.run_cli("--text", "at answer", "--msg-id", "at")[0], 0)
+        self.history("question", text="帮我给这5个打个分", raw=True)
+        self.assertEqual(self.run_cli("--text", "question answer", "--msg-id", "question")[0], 0)
+        self.assertEqual(self.api.call_count, 3)
+        with self.store.connect() as db:
+            triggers = [json.loads(row[0])["trigger"] for row in db.execute("SELECT metadata FROM reply_claims ORDER BY created")]
+        self.assertEqual(triggers, ["natural", "at", "question"])
+
+    def test_inferred_question_same_topic_debounces_for_ten_seconds(self):
+        self.history("one")
+        self.assertEqual(self.run_cli("--text", "answer", "--msg-id", "one")[0], 0)
+        self.history("two")
+        code, result = self.run_cli("--text", "reworded", "--msg-id", "two")
+        self.assertEqual(code, 3)
+        self.assertEqual(result["reason"], "question_topic_debounce")
+        with self.store.connect() as db:
+            db.execute("UPDATE reply_claims SET created=created-11")
+        self.assertEqual(self.run_cli("--text", "reworded", "--msg-id", "two")[0], 0)
+
+    def test_explicit_trigger_or_topic_and_missing_history_stay_compatible(self):
+        self.history("source", at_me=True)
+        for extra in (("--trigger", "legacy"), ("--topic-text", "explicit topic")):
+            code, result = self.run_cli("--text", "hi", "--msg-id", "source", *extra, "--dry-run")
+            self.assertEqual(code, 0)
+            self.assertEqual(result["trigger"], "legacy")
+            self.assertFalse(result["context_recovered"])
+        code, result = self.run_cli("--text", "hi", "--msg-id", "missing", "--dry-run")
+        self.assertEqual(result["trigger"], "legacy")
+        self.history("source", text="今天骑得很开心")
+        self.assertEqual(self.run_cli("--text", "hi", "--msg-id", "source", "--dry-run")[1]["trigger"], "natural")
