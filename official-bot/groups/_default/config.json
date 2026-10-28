@@ -1,6 +1,9 @@
 {
   "_comment": "新群自动创建的默认配置模板。机器人首次被拉进群或在群内收到消息时，默认只开启被 @ 礼貌回复；如需开启自然插话、定时资讯或生图等功能，请在该群自己的 config.json 中开启。",
   "enabled": true,
+  "enabled_plugins": ["command", "kb", "sticker", "digest", "reply", "natural_reply"],
+  "plugin_bindings": {},
+  "quotas": {"max_actions_per_day": 500},
   "features": {
     "natural_reply": false,
     "at_reply": true,

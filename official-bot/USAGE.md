@@ -3,6 +3,11 @@
 脚本：`python3 /workspace/qq-bot-persist/official-bot/send_group.py ...`
 规则不变：发消息前先 `--recent`；120 秒内已经发过会拒发（exit 3），确实是新的点才加 `--force`；发图/语音/视频/文件也算一次发送。
 
+新增分层实现见 [ARCHITECTURE.md](ARCHITECTURE.md)，迁移见 [MIGRATION.md](MIGRATION.md)。
+`--force` 仅绕过业务冷却；稳定操作身份及已成功/不确定的发送记录仍受保护。
+重复业务调用可传 `--action-id <稳定操作标识>`，多段发送按 part 记录状态。
+`--dry-run` 始终不上传或发送，包括与 `--upload-only` 组合时。
+
 ## 一、发送选项
 
 | 选项 | 作用 |
@@ -21,7 +26,7 @@
 | `--user-openid OPENID` | 发私聊（C2C），不发群；私聊不受 120 秒窗口限制 |
 | `--upload-only` | 只上传媒体、打印结果，**不发消息**（测试用） |
 | `--dry-run` | 只打印要发的请求内容，不上传也不发 |
-| `--group X` | 目标群：别名（zwift）、群名、QQ 号或 group_openid。**不写就是 Zwift练功房**。旧参数 `--group-openid` 仍然可用 |
+| `--group X` | 目标群：别名（zwift）、群名、QQ 号或 group_openid。**不写则读取已配置的默认群**。旧参数 `--group-openid` 仍然可用 |
 | `--feature F` | 该群 config 里 F 没开就拒发（exit 4），推送类例程用：`--feature daily_ai_news` |
 | `--recent` / `--force` | 跟以前一样，但**按群分开**（每个群有自己的 sent-log 和锁） |
 
@@ -52,7 +57,7 @@ sent-log.jsonl 每次发送记一行：`ts, at, scope(group/c2c), kind(text/mark
 
 ### 按钮说明
 - `action.type=2`（指令按钮）：点了插入「@机器人 data」，走普通消息事件。群里 `enter`（自动发送）不生效。
-- `action.type=1`（回调按钮）：点了触发 INTERACTION_CREATE，bridge 会自动 3 秒内 ACK，再转发成 `post_type=interaction`。同一 `group_id` 的按钮点了一个，其余变灰（适合答题、投票）。示例在 keyboards/quiz-callback.json。
+- `action.type=1`（回调按钮）：点了触发 INTERACTION_CREATE，bridge 将 ACK 放在独立通道尽快执行（网络故障仍可能导致失败），再转发成 `post_type=interaction`。同一 `group_id` 的按钮点了一个，其余变灰（适合答题、投票）。示例在 keyboards/quiz-callback.json。
 - `action.type=0`：跳转链接。
 - 每条最多 5 行 × 5 个；label 最多 10 字；style 0 灰框、1 蓝框、3 红字、4 蓝底；permission.type 0 指定用户、1 管理员、2 所有人。
 - ⚠️ 群里自定义按钮还没有真机验证过（详见 docs-explore.md）。如果报 304xxx/305007/40034106 之类的错，就说明还需要在控制台开通，到时只用 `<qqbot-cmd-input>`。

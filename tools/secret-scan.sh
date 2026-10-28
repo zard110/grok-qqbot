@@ -23,7 +23,7 @@ report() { echo "secret-scan: $1"; fail=1; }
 # 1) forbidden paths
 for f in "${FILES[@]}"; do
   case "$f" in
-    */appid|*/appsecret|*forwarder-url|*forwarder-key|*/url|*/key|github/*|*password*|*.bak*|*.log|*.jsonl|*.lock|*ref-cache*|*last-forward*|*local-watchdog-state*|*/c2c/*|*/_system/*|*/notes.md|*/knowledge/*|*/media/*|*bot_openid*|*group_openid.txt|*bot_uin*|*box-public-ip*|*onebot11_*|*Napcat*|*.tar.gz|*.env)
+    */appid|*/appsecret|*forwarder-url|*forwarder-key|*/url|*/key|github/*|*password*|*.bak*|*.log|*.jsonl|*.lock|*ref-cache*|*last-forward*|*local-watchdog-state*|*/c2c/*|*/_system/*|*/notes.md|*/knowledge/*|*/media/*|*bot_openid*|*group_openid.txt|*bot_uin*|*box-public-ip*|*onebot11_*|*Napcat*|*.tar.gz|*.env|*.sqlite3*|*.db|*.db-*|*dashboard-session*|*supervisor-*.json|*/groups/registry.json)
       report "forbidden path staged: $f" ;;
     official-bot/groups/*/config.json)
       [ "$f" = "official-bot/groups/_default/config.json" ] || report "real group config staged: $f" ;;
@@ -41,21 +41,21 @@ for c in official-bot/groups/*/config.json; do
   while read -r v; do [ "${#v}" -ge 6 ] && LIT+=("$v"); done < <(grep -oE '[0-9A-F]{32}|\b[0-9]{6,12}\b' "$c" | sort -u)
 done
 
-URL_ALLOW='^[0-9]+:https?://(\.\.\.$|github\.com/$|q\.qq\.com|bot\.q\.qq\.com|api\.sgroup\.qq\.com|api\.bot\.qq\.com|bots\.qq\.com|qq-ai\.cdn-go\.cn|github\.com/(x/y|<owner>|zard110/maxshenbi-qqbot)|example\.com|www\.qq\.com|qun\.qq\.com)'
+URL_ALLOW='^[0-9]+:https?://(\.\.\.$|github\.com/$|q\.qq\.com|bot\.q\.qq\.com|api\.sgroup\.qq\.com|api\.bot\.qq\.com|bots\.qq\.com|qq-ai\.cdn-go\.cn|github\.com/(x/y|<owner>|zard110/maxshenbi-qqbot)|example\.com|www\.qq\.com|qun\.qq\.com|127\.0\.0\.1(:[0-9]*)?(/|$)|localhost(:[0-9]*)?(/|$))'
 for f in "${FILES[@]}"; do
   content="$(show "$f" 2>/dev/null)" || continue
   for v in "${LIT[@]}"; do
     if grep -qF -- "$v" <<<"$content"; then report "$f contains a value from a local secret/identity file (value hidden)"; fi
   done
-  hits="$(grep -nE '\b[0-9A-Fa-f]{32}\b' <<<"$content")" && report "$f: 32-hex id: $(cut -c1-80 <<<"$hits" | head -3)"
-  hits="$(grep -nE '(^|[^0-9.])[0-9]{9,11}([^0-9]|$)' <<<"$content" | grep -vE '117440512')" && report "$f: 9-11 digit number (QQ/AppID?): $(cut -c1-80 <<<"$hits" | head -3)"
-  hits="$(grep -nE '(Bearer|QQBot) [A-Za-z0-9._-]{16,}' <<<"$content")" && report "$f: literal auth token: $(cut -c1-60 <<<"$hits" | head -2)"
-  hits="$(grep -niE '(secret|password|passwd|api[_-]?key|access_token)["'"'"']?\s*[:=]\s*["'"'"'][A-Za-z0-9+/_-]{8,}' <<<"$content")" && report "$f: credential assignment: $(cut -c1-60 <<<"$hits" | head -2)"
-  hits="$(grep -noE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' <<<"$content")" && report "$f: email address: $(head -2 <<<"$hits")"
-  hits="$(grep -noE 'https?://[^ )"'"'"'`<>]+' <<<"$content" | grep -vE "$URL_ALLOW")" && report "$f: non-allowlisted URL (webhook?): $(cut -c1-90 <<<"$hits" | head -3)"
+  hits="$(grep -nE '\b[0-9A-Fa-f]{32}\b' <<<"$content")" && report "$f: 32-hex id (matched lines: $(cut -d: -f1 <<<"$hits" | sort -u | head -3 | tr '\n' ','); values hidden)"
+  hits="$(grep -nE '(^|[^0-9.])[0-9]{9,11}([^0-9]|$)' <<<"$content" | grep -vE '117440512')" && report "$f: 9-11 digit number (QQ/AppID?) (matched lines: $(cut -d: -f1 <<<"$hits" | sort -u | head -3 | tr '\n' ','); values hidden)"
+  hits="$(grep -nE '(Bearer|QQBot) [A-Za-z0-9._-]{16,}' <<<"$content")" && report "$f: literal auth token (matched lines: $(cut -d: -f1 <<<"$hits" | sort -u | head -3 | tr '\n' ','); values hidden)"
+  hits="$(grep -niE '(secret|password|passwd|api[_-]?key|access_token)["'"'"']?\s*[:=]\s*["'"'"'][A-Za-z0-9+/_-]{8,}' <<<"$content")" && report "$f: credential assignment (matched lines: $(cut -d: -f1 <<<"$hits" | sort -u | head -3 | tr '\n' ','); values hidden)"
+  hits="$(grep -noE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' <<<"$content")" && report "$f: email address (matched lines: $(cut -d: -f1 <<<"$hits" | sort -u | head -3 | tr '\n' ','); values hidden)"
+  hits="$(grep -noE 'https?://[^ )"'"'"'`<>]+' <<<"$content" | grep -vE "$URL_ALLOW")" && report "$f: non-allowlisted URL (webhook?) (matched lines: $(cut -d: -f1 <<<"$hits" | sort -u | head -3 | tr '\n' ','); values hidden)"
 done
 if [ "$fail" -ne 0 ]; then
-  echo "secret-scan: BLOCKED. Remove the data above (or extend the allowlist in tools/secret-scan.sh after review)."
+  echo "secret-scan: BLOCKED. Remove the matching data (values are redacted) (or extend the allowlist in tools/secret-scan.sh after review)."
   exit 1
 fi
 echo "secret-scan: OK (${#FILES[@]} files)"

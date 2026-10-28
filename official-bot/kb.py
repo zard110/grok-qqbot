@@ -1,152 +1,254 @@
 #!/usr/bin/env python3
-"""Per-group knowledge base helper for MaxShenBi.
-
-  kb.py --group zwift search "query" [--max 20] [--context 1]
-  kb.py --group zwift sync            # git clone/pull repos from config.json into knowledge/repos/
-  kb.py --group zwift list            # list docs + repos
-  kb.py --group zwift add-doc PATH    # copy a md/txt/pdf into knowledge/
-
-Only ever reads the given group's own folder — never another group's knowledge.
-PDFs are converted with pdftotext into knowledge/.pdftext/ (cached by mtime) and searched as text.
-"""
+"""Scoped knowledge CLI; legacy search/sync/list/add-doc flags remain available."""
 from __future__ import annotations
-
 import argparse
+import hashlib
 import json
-import shutil
+import os
 import subprocess
-import sys
+import tempfile
+import time
 from pathlib import Path
-
-DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(DIR))
-import groups as G  # noqa: E402
-
-
-def kdir(goid: str, cfg: dict) -> Path:
-    gd = G.group_dir(goid)
-    d = (gd / ((cfg.get("knowledge") or {}).get("docs_dir") or "knowledge/")).resolve()
-    if not str(d).startswith(str(gd.resolve())):
-        raise SystemExit("docs_dir must stay inside the group folder")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+from urllib.parse import urlparse
+import groups as G
+from core.files import atomic_write_bytes, atomic_write_json, confined_path, file_lock
+from core.memory import MemoryStore
+from core.settings import DATA_DIR
+MAX_BYTES = 20 * 1024 * 1024
+MAX_TEXT = 8 * 1024 * 1024
+TEXT_TYPES = {'.md', '.txt', '.py', '.js', '.ts', '.tsx', '.json', '.yaml', '.yml', '.rst'}
 
 
-def pdf_cache(kd: Path) -> None:
-    out = kd / ".pdftext"
-    for pdf in kd.rglob("*.pdf"):
-        if ".pdftext" in pdf.parts:
+def _read_bounded(path, limit):
+    if path.stat().st_size > limit:
+        raise ValueError('Source exceeds read budget')
+    with path.open('rb') as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('Source grew beyond read budget')
+    return data
+
+
+def kdir(goid, cfg):
+    path = confined_path(G.group_dir(goid), (cfg.get('knowledge') or {}).get('docs_dir') or 'knowledge')
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _files(kd):
+    for path in sorted(kd.rglob('*')):
+        relative = path.relative_to(kd)
+        if any(p.startswith('.') or p == 'node_modules' for p in relative.parts):
             continue
-        txt = out / (str(pdf.relative_to(kd)) + ".txt")
-        if txt.exists() and txt.stat().st_mtime >= pdf.stat().st_mtime:
-            continue
-        txt.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["pdftotext", "-layout", str(pdf), str(txt)], check=False)
+        if path.is_file() and not path.is_symlink() and path.suffix.lower() in TEXT_TYPES | {'.pdf'}:
+            yield relative.as_posix(), confined_path(kd, relative)
 
 
-def cmd_search(goid, cfg, args) -> int:
-    kd = kdir(goid, cfg)
-    pdf_cache(kd)
-    terms = [args.query] + [t for t in args.query.split() if len(t) > 1 and t != args.query]
-    rg = [
-        "rg", "--json", "-i", "--max-count", "5", "-C", str(args.context),
-        "--hidden", "-g", "!.git", "-g", "!*.png", "-g", "!*.jpg", "-g", "!*.gif", "-g", "!*.mp4",
-        "-g", "!*.pdf", "-g", "!node_modules",
-    ] + sum((["-e", t] for t in terms), []) + [str(kd)]
-    p = subprocess.run(rg, capture_output=True, text=True)
-    hits, shown = [], 0
-    for line in p.stdout.splitlines():
+def _pdf_text(kd, path):
+    relative = path.relative_to(kd).as_posix()
+    digest = hashlib.sha256(_read_bounded(path, MAX_BYTES)).hexdigest()
+    cache_root = confined_path(kd, '.pdftext')
+    cache_root.mkdir(exist_ok=True)
+    cache = cache_root / (hashlib.sha256(relative.encode()).hexdigest() + '.txt')
+    meta = cache.with_suffix('.json')
+    with file_lock(cache.with_suffix('.lock')):
         try:
-            ev = json.loads(line)
-        except Exception:
-            continue
-        if ev.get("type") not in ("match", "context"):
-            continue
-        d = ev["data"]
-        path = Path(d["path"]["text"])
-        rel = str(path.relative_to(kd))
-        if rel.startswith(".pdftext/"):
-            rel = rel[len(".pdftext/"):-4] + " (pdf)"
-        hits.append({"file": rel, "line": d.get("line_number"), "match": ev["type"] == "match",
-                     "text": (d.get("lines", {}).get("text") or "").rstrip()[:300]})
-    out = []
-    for h in hits:
-        if h["match"]:
-            shown += 1
-            if shown > args.max:
-                break
-        out.append(h)
+            if json.loads(meta.read_text())['digest'] == digest and cache.stat().st_size <= MAX_TEXT:
+                return cache.read_text(encoding='utf-8')
+        except (OSError, ValueError, KeyError):
+            pass
+        fd, temporary = tempfile.mkstemp(prefix='.extract-', dir=cache_root)
+        os.close(fd)
+        temp_path, process = Path(temporary), None
+        try:
+            process = subprocess.Popen(['pdftotext', '-layout', str(path), str(temp_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + 30
+            while process.poll() is None:
+                if time.monotonic() > deadline or temp_path.stat().st_size > MAX_TEXT:
+                    process.kill(); process.wait(timeout=5)
+                    raise ValueError('PDF extraction exceeded time or output budget')
+                time.sleep(.05)
+            if process.returncode or temp_path.stat().st_size > MAX_TEXT:
+                raise ValueError('PDF extraction failed')
+            text = temp_path.read_text(encoding='utf-8')
+            if hashlib.sha256(_read_bounded(path, MAX_BYTES)).hexdigest() != digest:
+                raise ValueError('PDF changed during extraction; retry')
+            atomic_write_bytes(cache, text.encode())
+            atomic_write_json(meta, {'digest': digest, 'source': relative})
+            return text
+        finally:
+            if process and process.poll() is None:
+                process.kill(); process.wait(timeout=5)
+            temp_path.unlink(missing_ok=True)
+
+
+def pdf_cache(kd):
+    for _, path in _files(kd):
+        if path.suffix.lower() == '.pdf':
+            if path.stat().st_size > MAX_BYTES:
+                raise ValueError('PDF exceeds 20 MiB')
+            _pdf_text(kd, path)
+
+
+def refresh_index(goid, cfg, store=None):
+    store, kd = store or MemoryStore(DATA_DIR), kdir(goid, cfg)
+    with file_lock(G.group_dir(goid) / '.knowledge.lock'):
+        seen, failures = set(), []
+        for name, path in _files(kd):
+            seen.add(name)
+            try:
+                if path.stat().st_size > MAX_BYTES:
+                    raise ValueError('Document exceeds 20 MiB')
+                text = _pdf_text(kd, path) if path.suffix.lower() == '.pdf' else _read_bounded(path, MAX_TEXT).decode('utf-8')
+                store.index_document(goid, name, text)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                store.delete_document(goid, name)
+                failures.append({'file': name, 'error': str(error)})
+        for record in store.documents(goid):
+            if record['name'] not in seen:
+                store.delete_document(goid, record['name'])
+        cache = confined_path(kd, '.pdftext')
+        if cache.exists():
+            for metadata in cache.glob('*.json'):
+                try:
+                    if json.loads(metadata.read_text())['source'] not in seen:
+                        metadata.with_suffix('.txt').unlink(missing_ok=True)
+                        metadata.unlink()
+                except (OSError, ValueError, KeyError):
+                    continue
+    return failures
+
+
+def cmd_search(goid, cfg, args):
+    store = MemoryStore(DATA_DIR)
+    failures = refresh_index(goid, cfg, store)
+    hits = store.search_documents(goid, args.query, args.max)
+    context = max(0, min(int(args.context), 20))
+    for hit in hits:
+        lines = hit['text'].splitlines()
+        terms = [args.query.lower()] + args.query.lower().split()
+        index = next((i for i, line in enumerate(lines) if any(term in line.lower() for term in terms)), 0)
+        start = max(0, index - context)
+        hit['text'] = '\n'.join(lines[start:index + context + 1])
+        hit['line'] += start
     if args.json:
-        print(json.dumps({"group": cfg.get("name"), "query": args.query, "hits": out}, ensure_ascii=False, indent=1))
+        print(json.dumps({'group': cfg.get('name'), 'query': args.query, 'hits': hits, 'errors': failures}, ensure_ascii=False, indent=1))
     else:
-        print(f"# {cfg.get('name')} 知识库搜索: {args.query}  ({min(shown, args.max)} 条匹配)")
-        last = None
-        for h in out:
-            if h["file"] != last:
-                print(f"\n## {h['file']}")
-                last = h["file"]
-            print(f"{h['line']}{':' if h['match'] else '-'} {h['text']}")
-    return 0 if shown else 1
+        for hit in hits:
+            print(f"{hit['file']}:{hit['line']} {hit['text']}")
+        for failure in failures:
+            print(f"ERROR {failure['file']}: {failure['error']}")
+    return 2 if failures else 0 if hits else 1
 
 
-def cmd_sync(goid, cfg, args) -> int:
-    gd = G.group_dir(goid)
-    rc = 0
-    for r in (cfg.get("knowledge") or {}).get("repos") or []:
-        url, br = r.get("url"), r.get("branch") or ""
-        lp = (gd / (r.get("local_path") or f"knowledge/repos/{Path(url).stem}")).resolve()
-        if not str(lp).startswith(str(gd.resolve())):
-            print(f"skip {url}: local_path outside group folder"); rc = 1; continue
-        if (lp / ".git").exists():
-            cmd = ["git", "-C", str(lp), "pull", "--ff-only", "-q"]
+def cmd_sync(goid, cfg, args):
+    gd, kd, rc = G.group_dir(goid), kdir(goid, cfg), 0
+    for repo in (cfg.get('knowledge') or {}).get('repos') or []:
+        url = repo.get('url', '')
+        parsed = urlparse(url)
+        if parsed.scheme != 'https' or parsed.hostname != 'github.com' or parsed.username or parsed.password or parsed.query or parsed.fragment or len(parsed.path.strip('/').split('/')) != 2:
+            raise ValueError('Sync accepts public https://github.com/<owner>/<repository> URLs only')
+        dst = confined_path(gd, repo.get('local_path') or 'knowledge/repos/' + Path(parsed.path).stem)
+        if not dst.is_relative_to(kd):
+            raise ValueError('Repository must stay inside configured knowledge directory')
+        with file_lock(gd / '.knowledge.lock'):
+            if (dst / '.git').exists():
+                remote = subprocess.run(['git', '-C', str(dst), 'remote', 'get-url', 'origin'], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+                if remote != url:
+                    raise ValueError('Existing remote does not match configuration')
+                cmd = ['git', '-c', 'core.hooksPath=/dev/null', '-C', str(dst), 'pull', '--ff-only', '-q']
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                branch = repo.get('branch') or ''
+                cmd = ['git', '-c', 'core.hooksPath=/dev/null', 'clone', '-q', '--depth', '1'] + (['-b', branch] if branch else []) + ['--', url, str(dst)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+            print(f"{'OK' if result.returncode == 0 else 'ERR'} {url}")
+            rc = max(rc, int(result.returncode != 0))
+    return max(rc, int(bool(refresh_index(goid, cfg))))
+
+
+def cmd_list(goid, cfg, args):
+    for name, path in _files(kdir(goid, cfg)):
+        print(f'doc {name} {path.stat().st_size}B')
+    return 0
+
+
+def cmd_add_doc(goid, cfg, args):
+    source = Path(args.path)
+    if source.suffix.lower() not in {'.md', '.txt', '.pdf'} or source.stat().st_size > MAX_BYTES:
+        raise ValueError('Only md/txt/pdf documents up to 20 MiB accepted')
+    with file_lock(G.group_dir(goid) / '.knowledge.lock'):
+        MemoryStore(DATA_DIR).delete_document(goid, source.name)
+        atomic_write_bytes(confined_path(kdir(goid, cfg), source.name), _read_bounded(source, MAX_BYTES))
+    failures = refresh_index(goid, cfg)
+    if failures:
+        raise ValueError(json.dumps(failures, ensure_ascii=False))
+    print(f'added {source.name}')
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--group')
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    search = sub.add_parser('search'); search.add_argument('query')
+    search.add_argument('--max', type=int, default=20); search.add_argument('--context', type=int, default=1); search.add_argument('--json', action='store_true')
+    for name in ('sync', 'list', 'import-legacy', 'context'):
+        sub.add_parser(name)
+    for name in ('add-doc', 'remove', 'export', 'import'):
+        sub.add_parser(name).add_argument('path')
+    rollback = sub.add_parser('rollback'); rollback.add_argument('path'); rollback.add_argument('revision', type=int)
+    args = parser.parse_args()
+    try:
+        goid = G.resolve(args.group); cfg = G.load_config(goid)
+        if not cfg or not cfg.get('enabled', True) or not cfg.get('features', {}).get('knowledge', True):
+            raise ValueError('Group knowledge unavailable or disabled')
+        function = {'search': cmd_search, 'sync': cmd_sync, 'list': cmd_list, 'add-doc': cmd_add_doc}.get(args.cmd)
+        if function:
+            return function(goid, cfg, args)
+        store = MemoryStore(DATA_DIR)
+        if args.cmd == 'remove':
+            store.delete_document(goid, args.path)
+            confined_path(kdir(goid, cfg), args.path).unlink(missing_ok=True)
+            refresh_index(goid, cfg, store)
+        elif args.cmd == 'export':
+            atomic_write_json(Path(args.path), store.export_scope(goid))
+        elif args.cmd == 'import':
+            snapshot = json.loads(Path(args.path).read_text(encoding='utf-8'))
+            if snapshot.get('scope') != goid or snapshot.get('format') != 1:
+                raise ValueError('Snapshot scope or format mismatch')
+            staged = []
+            for doc in snapshot.get('documents', []):
+                name = doc['name'] if Path(doc['name']).suffix.lower() in TEXT_TYPES else doc['name'] + '.restored.txt'
+                target = confined_path(kdir(goid, cfg), name)
+                if not isinstance(doc['text'], str) or len(doc['text'].encode()) > MAX_TEXT:
+                    raise ValueError('Snapshot document exceeds text budget')
+                staged.append((name, target, doc['text']))
+            result = store.restore_scope(goid, {**snapshot, 'documents': []})
+            with file_lock(G.group_dir(goid) / '.knowledge.lock'):
+                for name, target, text in staged:
+                    # Import never overwrites a concurrently maintained source document.
+                    if target.exists():
+                        continue
+                    atomic_write_bytes(target, text.encode())
+                    store.index_document(goid, name, text)
+            print({**result, 'document_candidates': len(staged)})
+        elif args.cmd == 'rollback':
+            if Path(args.path).suffix.lower() == '.pdf':
+                raise ValueError('Restore original PDF bytes; extracted text cannot restore a PDF')
+            result = store.rollback_document(goid, args.path, args.revision)
+            document = next(d for d in store.export_scope(goid)['documents'] if d['name'] == args.path)
+            atomic_write_bytes(confined_path(kdir(goid, cfg), args.path), document['text'].encode())
+            print(result)
+        elif args.cmd == 'import-legacy':
+            gd = G.group_dir(goid)
+            print(store.import_legacy(goid, gd / 'last-events.jsonl', gd / 'notes.md', gd / 'sent-log.jsonl'))
         else:
-            lp.parent.mkdir(parents=True, exist_ok=True)
-            cmd = ["git", "clone", "-q", "--depth", "1"] + (["-b", br] if br else []) + [url, str(lp)]
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        head = subprocess.run(["git", "-C", str(lp), "log", "-1", "--format=%h %cd %s", "--date=iso"], capture_output=True, text=True).stdout.strip()
-        print(f"{'OK ' if p.returncode == 0 else 'ERR'} {url} -> {lp.relative_to(gd)}  {head} {p.stderr.strip()[:200]}")
-        rc |= p.returncode
-    return rc
+            print(json.dumps(store.context(goid), ensure_ascii=False, indent=2))
+        return 0
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        print(f'ERROR: {error}'); return 2
 
 
-def cmd_list(goid, cfg, args) -> int:
-    kd = kdir(goid, cfg)
-    print(f"# {cfg.get('name')} ({goid})  knowledge: {kd}")
-    for f in sorted(kd.rglob("*")):
-        if f.is_file() and ".git" not in f.parts and ".pdftext" not in f.parts and "repos" not in f.relative_to(kd).parts[:1]:
-            print(f"doc  {f.relative_to(kd)}  {f.stat().st_size}B")
-    for r in (cfg.get("knowledge") or {}).get("repos") or []:
-        print(f"repo {r.get('url')} -> {r.get('local_path')}")
-    return 0
-
-
-def cmd_add_doc(goid, cfg, args) -> int:
-    kd = kdir(goid, cfg)
-    src = Path(args.path)
-    dst = kd / src.name
-    shutil.copy2(src, dst)
-    print(f"added {dst}")
-    return 0
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--group", help="alias / name / QQ number / group_openid (default Zwift)")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("search"); s.add_argument("query"); s.add_argument("--max", type=int, default=20)
-    s.add_argument("--context", type=int, default=1); s.add_argument("--json", action="store_true")
-    sub.add_parser("sync"); sub.add_parser("list")
-    a = sub.add_parser("add-doc"); a.add_argument("path")
-    args = ap.parse_args()
-    goid = G.resolve(args.group)
-    cfg = G.load_config(goid)
-    if cfg is None:
-        raise SystemExit(f"group {goid} has no config.json")
-    if not (cfg.get("features") or {}).get("knowledge", True):
-        raise SystemExit(f"knowledge feature is off for {cfg.get('name')}")
-    fn = {"search": cmd_search, "sync": cmd_sync, "list": cmd_list, "add-doc": cmd_add_doc}[args.cmd]
-    sys.exit(fn(goid, cfg, args))
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    raise SystemExit(main())

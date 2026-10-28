@@ -18,18 +18,91 @@ Usage:
 """
 from __future__ import annotations
 import argparse
+import contextvars
+import functools
+import hashlib
+import io
 import json
 import math
 import random
 import re
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
+import groups as G
+from core.files import atomic_write_bytes, atomic_write_json, confined_path, file_lock
 
-DIR = Path(__file__).resolve().parent
-STICKER_DIR = DIR / "groups" / "zwift" / "stickers"
-TPL_DIR = STICKER_DIR / "templates"
-INDEX_PATH = STICKER_DIR / "index.json"
-RECENT_PATH = STICKER_DIR / ".recent_used.json"
+DIR = G.DIR
+
+
+@dataclass(frozen=True)
+class StickerPaths:
+    group_openid: str
+    stickers: Path
+    templates: Path
+    index: Path
+    recent: Path
+
+
+_SCOPE = contextvars.ContextVar("sticker_scope", default=None)
+
+
+@contextmanager
+def use_group(group: str | None = None):
+    if group is None and _SCOPE.get() is not None:
+        yield _SCOPE.get()
+        return
+    try:
+        goid = G.resolve(group)
+    except FileNotFoundError:
+        if group is not None:
+            raise
+        # Preserve the old single-group CLI without an environment migration.
+        # Explicit scopes never enter this path, and registered groups still
+        # require their own policy instead of borrowing the legacy library.
+        try:
+            goid = G.resolve("zwift")
+        except G.ConfigError:
+            legacy = confined_path(G.GROUPS, "zwift/stickers")
+            candidates = {confined_path(G.GROUPS, child.name + "/stickers")
+                          for child in G.GROUPS.iterdir()
+                          if child.is_dir() and child.name != "_default" and (child / "stickers").is_dir()} if G.GROUPS.exists() else set()
+            if G.all_groups() or candidates != {legacy} or not legacy.is_dir():
+                raise ValueError("Specify --group or configure group_openid.txt")
+            paths = StickerPaths("legacy:zwift", legacy, legacy / "templates", legacy / "index.json", legacy / ".recent_used.json")
+            token = _SCOPE.set(paths)
+            try:
+                yield paths
+            finally:
+                _SCOPE.reset(token)
+            return
+    if not G.plugin_enabled(goid, "sticker"):
+        raise PermissionError("Sticker plugin is disabled or group is not registered")
+    directory = confined_path(G.group_dir(goid), "stickers")
+    paths = StickerPaths(goid, directory, directory / "templates", directory / "index.json", directory / ".recent_used.json")
+    token = _SCOPE.set(paths)
+    try:
+        yield paths
+    finally:
+        _SCOPE.reset(token)
+
+
+def _paths() -> StickerPaths:
+    paths = _SCOPE.get()
+    if paths is None:
+        raise RuntimeError("Sticker operation requires a group scope")
+    return paths
+
+
+def group_scoped(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, group=None, **kwargs):
+        with use_group(group):
+            with file_lock(_paths().stickers / ".library.lock"):
+                return fn(*args, **kwargs)
+    return wrapped
 
 FONT_PATHS = [
     "/workspace/video_studio/NotoSansCJKsc-Bold.otf",
@@ -56,10 +129,11 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+@group_scoped
 def load_recent() -> dict:
-    if RECENT_PATH.exists():
+    if _paths().recent.exists():
         try:
-            data = json.loads(RECENT_PATH.read_text(encoding="utf-8"))
+            data = json.loads(_paths().recent.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return {
                     "recent_stickers": list(data.get("recent_stickers", []))[-25:],
@@ -70,20 +144,18 @@ def load_recent() -> dict:
     return {"recent_stickers": [], "recent_templates": []}
 
 
+@group_scoped
 def save_recent(data: dict) -> None:
-    try:
-        RECENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        trimmed = {
-            "recent_stickers": list(data.get("recent_stickers", []))[-25:],
-            "recent_templates": list(data.get("recent_templates", []))[-25:],
-        }
-        RECENT_PATH.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    trimmed = {
+        "recent_stickers": list(data.get("recent_stickers", []))[-25:],
+        "recent_templates": list(data.get("recent_templates", []))[-25:],
+    }
+    atomic_write_json(_paths().recent, trimmed)
 
 
+@group_scoped
 def choose_template(template_arg: str, category: str | None = None) -> str:
-    available = sorted(p.stem for p in TPL_DIR.glob("*.png"))
+    available = sorted(p.stem for p in _paths().templates.glob("*.png"))
     if not available:
         return "smirk"
 
@@ -91,12 +163,9 @@ def choose_template(template_arg: str, category: str | None = None) -> str:
     recent_tpls = recent_data["recent_templates"]
 
     if template_arg and template_arg != "random":
-        chosen = template_arg if template_arg in available else "smirk"
-        if chosen in recent_tpls[-15:]:
-            # Avoid repeating the same template even when specified by habit!
-            fresh_all = [t for t in available if t not in recent_tpls[-15:]]
-            if fresh_all:
-                chosen = random.choice(fresh_all)
+        if template_arg not in available:
+            raise ValueError("Unknown sticker template")
+        chosen = template_arg
     else:
         pool = available
         if category and category in TEMPLATE_CATEGORIES:
@@ -108,12 +177,13 @@ def choose_template(template_arg: str, category: str | None = None) -> str:
             fresh = [t for t in pool if t not in recent_tpls[-4:]] or pool
         chosen = random.choice(fresh)
 
-    if chosen in recent_tpls:
-        recent_tpls.remove(chosen)
-    recent_tpls.append(chosen)
-    recent_data["recent_templates"] = recent_tpls[-25:]
-    save_recent(recent_data)
     return chosen
+
+
+def record_template(template: str) -> None:
+    recent = load_recent()
+    recent["recent_templates"] = [x for x in recent["recent_templates"] if x != template] + [template]
+    save_recent(recent)
 
 
 def parse_lines(text: str) -> list[str]:
@@ -169,6 +239,7 @@ def render_static_frame(head: Image.Image, lines: list[str], W: int = 300) -> tu
     return canvas, nw, nh, H
 
 
+@group_scoped
 def make_meme(
     template: str,
     text: str,
@@ -177,9 +248,9 @@ def make_meme(
     category: str | None = None,
 ) -> tuple[str, str]:
     chosen_tpl = choose_template(template, category=category)
-    tpl_file = TPL_DIR / f"{chosen_tpl}.png"
+    tpl_file = _paths().templates / f"{chosen_tpl}.png"
     if not tpl_file.exists():
-        tpl_file = TPL_DIR / "smirk.png"
+        tpl_file = _paths().templates / "smirk.png"
     head = Image.open(tpl_file).convert("RGB")
     lines = parse_lines(text)
     W = 300
@@ -189,7 +260,10 @@ def make_meme(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if not animate:
-        base_canvas.save(out, quality=92)
+        buffer = io.BytesIO()
+        base_canvas.save(buffer, format="PNG" if out.suffix.lower() == ".png" else "JPEG", quality=92)
+        atomic_write_bytes(out, buffer.getvalue())
+        record_template(chosen_tpl)
         return str(out), chosen_tpl
 
     # Animated GIF generation (shake | zoom | bounce)
@@ -248,21 +322,26 @@ def make_meme(
         # Quantize frame for clean compact GIF
         frames.append(frame.quantize(colors=128, method=Image.Quantize.MEDIANCUT))
 
+    buffer = io.BytesIO()
     frames[0].save(
-        out,
+        buffer,
+        format="GIF",
         save_all=True,
         append_images=frames[1:],
         duration=55,
         loop=0,
         optimize=True,
     )
+    atomic_write_bytes(out, buffer.getvalue())
+    record_template(chosen_tpl)
     return str(out), chosen_tpl
 
 
+@group_scoped
 def pick_sticker(query: str, prefer_gif: bool = False) -> dict:
-    if not INDEX_PATH.exists():
+    if not _paths().index.exists():
         return {"ok": False, "error": "index.json not found"}
-    idx_data = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+    idx_data = json.loads(_paths().index.read_text(encoding="utf-8"))
     stickers = idx_data.get("ready_stickers", [])
     if not stickers:
         return {"ok": False, "error": "no ready_stickers in index.json"}
@@ -277,7 +356,7 @@ def pick_sticker(query: str, prefer_gif: bool = False) -> dict:
     scored = []
     for item in stickers:
         rel_file = item.get("file", "")
-        full_path = STICKER_DIR / rel_file
+        full_path = confined_path(_paths().stickers, rel_file)
         if not full_path.exists():
             continue
         text_lower = (item.get("text", "") or "").lower()
@@ -328,13 +407,7 @@ def pick_sticker(query: str, prefer_gif: bool = False) -> dict:
             top_pool = [x[2] for x in any_matches if x[0] >= max_sc * 0.75]
             chosen = random.choice(top_pool)
         else:
-            # Fallback to any non-recent sticker
-            pool = [x[2] for x in scored if x[1]] or [x[2] for x in scored]
-            if want_gif:
-                gif_pool = [x for x in pool if x.get("is_gif")]
-                if gif_pool:
-                    pool = gif_pool
-            chosen = random.choice(pool)
+            return {"ok": False, "error": "no_match", "group_openid": _paths().group_openid}
 
     rel_file = chosen["file"]
     recent_list = recent_data["recent_stickers"]
@@ -346,7 +419,7 @@ def pick_sticker(query: str, prefer_gif: bool = False) -> dict:
 
     return {
         "ok": True,
-        "path": str(STICKER_DIR / rel_file),
+        "path": str(confined_path(_paths().stickers, rel_file)),
         "file": rel_file,
         "text": chosen.get("text", ""),
         "category": chosen.get("category", ""),
@@ -356,11 +429,12 @@ def pick_sticker(query: str, prefer_gif: bool = False) -> dict:
 
 
 
+@group_scoped
 def search_candidates(query: str, top_k: int = 8) -> dict:
     """Search across ALL 142+ ready stickers AND 25 templates, returning the top candidates with their text/description and whether they were recently used."""
-    if not INDEX_PATH.exists():
+    if not _paths().index.exists():
         return {"ok": False, "error": "index.json not found"}
-    idx_data = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+    idx_data = json.loads(_paths().index.read_text(encoding="utf-8"))
     stickers = idx_data.get("ready_stickers", [])
     templates = idx_data.get("templates", {})
     recent_data = load_recent()
@@ -372,7 +446,7 @@ def search_candidates(query: str, top_k: int = 8) -> dict:
     sticker_hits = []
     for item in stickers:
         rel_file = item.get("file", "")
-        full_path = STICKER_DIR / rel_file
+        full_path = confined_path(_paths().stickers, rel_file)
         if not full_path.exists():
             continue
         text_lower = (item.get("text", "") or "").lower()
@@ -391,6 +465,9 @@ def search_candidates(query: str, top_k: int = 8) -> dict:
                 score += 1.0
             if tok in haystack:
                 score += 1.5
+        relevance = score
+        if relevance <= 0:
+            continue
         if item.get("is_gif"):
             score += 0.5
         used_recently = rel_file in recent_files
@@ -420,6 +497,8 @@ def search_candidates(query: str, top_k: int = 8) -> dict:
             elif any(ch in desc_lower for ch in tok if len(tok) >= 2):
                 score += 1.2
         used_recently = tpl_name in recent_tpls
+        if score <= 0:
+            continue
         if used_recently:
             score -= 8.0
         tpl_hits.append((score, random.random(), {
@@ -441,62 +520,58 @@ def search_candidates(query: str, top_k: int = 8) -> dict:
 
 
 
+@group_scoped
 def add_sticker_to_index(file_arg: str, text: str, category: str = "panda", tags_str: str = "") -> dict:
-    """Add a newly collected group sticker to index.json with filename + MD5 deduplication."""
-    import hashlib
-    cand = Path(file_arg)
-    if not cand.is_absolute():
-        cand = STICKER_DIR / cand.name
-    if not cand.exists():
-        cand = STICKER_DIR / Path(file_arg).name
-    if not cand.exists():
-        return {"ok": False, "error": f"Sticker file not found: {file_arg}"}
-
-    rel_file = cand.name
-    new_md5 = hashlib.md5(cand.read_bytes()).hexdigest()
-
-    idx_data = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {"summary": {}, "templates": {}, "ready_stickers": []}
-    stickers = idx_data.get("ready_stickers", [])
-
+    """Copy a validated image into this group's content-addressed managed library."""
+    candidate = Path(file_arg)
+    if not candidate.is_absolute():
+        # The old CLI accepted stickers/name.gif; resolve only inside this group.
+        name = candidate.name if candidate.parts[:1] == ("stickers",) else file_arg
+        candidate = confined_path(_paths().stickers, name)
+    if not candidate.is_file():
+        return {"ok": False, "error": "sticker_not_found"}
+    if candidate.stat().st_size > 5 * 1024 * 1024:
+        raise ValueError("Sticker exceeds 5 MiB")
+    content = candidate.read_bytes()
+    if len(content) > 5 * 1024 * 1024:
+        raise ValueError("Sticker exceeds 5 MiB")
+    with Image.open(io.BytesIO(content)) as picture:
+        image_format = picture.format
+        if image_format not in {"PNG", "JPEG", "GIF", "WEBP"}:
+            raise ValueError("Unsupported sticker image format")
+        if picture.width * picture.height > 20_000_000:
+            raise ValueError("Sticker dimensions exceed the limit")
+        picture.verify()
+    digest = hashlib.sha256(content).hexdigest()
+    suffix = {"PNG": ".png", "JPEG": ".jpg", "GIF": ".gif", "WEBP": ".webp"}[image_format]
+    filename = digest + suffix
+    destination = confined_path(_paths().stickers, filename)
+    data = json.loads(_paths().index.read_text(encoding="utf-8")) if _paths().index.exists() else {"templates": {}, "ready_stickers": []}
+    stickers = data.setdefault("ready_stickers", [])
+    # Existing legacy files receive a hash only during explicit ingestion, not every search.
     for item in stickers:
-        existing_rel = item.get("file", "")
-        if existing_rel.startswith("groups/"):
-            existing_rel = Path(existing_rel).name
-            item["file"] = existing_rel
-        existing_p = STICKER_DIR / existing_rel
-        if existing_rel == rel_file:
+        existing = confined_path(_paths().stickers, item.get("file", ""))
+        if not item.get("sha256") and existing.is_file():
+            item["sha256"] = hashlib.sha256(existing.read_bytes()).hexdigest()
+        if item.get("sha256") == digest:
             if text:
                 item["text"] = text
-            if category:
-                item["category"] = category
             if tags_str:
-                item["tags"] = [t.strip() for t in re.split(r"[\s,|/，、]+", tags_str) if t.strip()]
-            INDEX_PATH.write_text(json.dumps(idx_data, ensure_ascii=False, indent=1), encoding="utf-8")
-            return {"ok": True, "status": "updated_existing", "file": rel_file, "total": len(stickers)}
-        if existing_p.exists():
-            try:
-                if hashlib.md5(existing_p.read_bytes()).hexdigest() == new_md5:
-                    return {"ok": True, "status": "duplicate_md5_skipped", "existing_file": existing_rel, "total": len(stickers)}
-            except Exception:
-                pass
-
-    tags = [t.strip() for t in re.split(r"[\s,|/，、]+", tags_str) if t.strip()] if tags_str else ["群友存图", "斗图"]
-    entry = {
-        "file": rel_file,
-        "text": text or rel_file,
-        "category": category or "panda",
-        "tags": tags,
-        "is_gif": cand.suffix.lower() == ".gif",
-        "source": "group_collected",
-    }
+                item["tags"] = [x for x in re.split(r"[\s,|/，、]+", tags_str) if x]
+            atomic_write_json(_paths().index, data)
+            return {"ok": True, "status": "duplicate_sha256_skipped", "existing_file": item["file"], "total": len(stickers)}
+    atomic_write_bytes(destination, content)
+    entry = {"file": filename, "sha256": digest, "original_name": candidate.name,
+             "text": text or candidate.stem, "category": category,
+             "tags": [x for x in re.split(r"[\s,|/，、]+", tags_str) if x] or ["群友存图"],
+             "is_gif": image_format == "GIF", "source": "group_collected"}
     stickers.append(entry)
-    idx_data["ready_stickers"] = stickers
-    summary = idx_data.setdefault("summary", {})
-    summary["total_ready_stickers"] = len(stickers)
-    summary["group_collected"] = sum(1 for x in stickers if not str(x.get("file", "")).startswith("library/"))
-    summary["gif_count"] = sum(1 for x in stickers if x.get("is_gif"))
-    INDEX_PATH.write_text(json.dumps(idx_data, ensure_ascii=False, indent=1), encoding="utf-8")
+    data["summary"] = {"total_ready_stickers": len(stickers),
+                       "group_collected": sum(x.get("source") == "group_collected" for x in stickers),
+                       "gif_count": sum(bool(x.get("is_gif")) for x in stickers)}
+    atomic_write_json(_paths().index, data)
     return {"ok": True, "status": "added", "entry": entry, "total": len(stickers)}
+
 
 
 def main() -> None:
@@ -508,11 +583,19 @@ def main() -> None:
     ap.add_argument("--pick", default=None, help="Pick a ready sticker by keyword/emotion/character tag (avoids last 25 used)")
     ap.add_argument("--search", default=None, help="Search all 142+ ready stickers and 25 templates for the best contextual match")
     ap.add_argument("--prefer-gif", action="store_true", help="Prefer GIF when using --pick")
-    ap.add_argument("--out", default="/workspace/napcat/media/custom_sticker.jpg", help="Output path for generated meme")
+    ap.add_argument("--out", default=None, help="Output path for generated meme")
     ap.add_argument("--list", action="store_true", help="List all templates and ready stickers index")
-    ap.add_argument("--add-sticker", default=None, help="Add a newly collected sticker file into index.json (with MD5 dedup)")
+    ap.add_argument("--add-sticker", default=None, help="Copy a validated image into this group's library with SHA-256 dedup")
     ap.add_argument("--tags", default="", help="Comma/space separated tags when using --add-sticker")
+    ap.add_argument("--group", help="Group alias or openid (default configured group)")
     args = ap.parse_args()
+    with use_group(args.group):
+        run_cli(args, ap)
+
+
+def run_cli(args, ap) -> None:
+    if not args.out:
+        args.out = str(_paths().stickers / "generated" / (uuid.uuid4().hex + ".jpg"))
 
     if args.add_sticker:
         res = add_sticker_to_index(args.add_sticker, args.text or "", args.category or "panda", args.tags)
@@ -520,7 +603,7 @@ def main() -> None:
         return
 
     if args.list:
-        print(INDEX_PATH.read_text(encoding="utf-8") if INDEX_PATH.exists() else "{}")
+        print(_paths().index.read_text(encoding="utf-8") if _paths().index.exists() else "{}")
         return
 
     if args.search:

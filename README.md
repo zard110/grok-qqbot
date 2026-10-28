@@ -1,33 +1,49 @@
 # MaxShenBi QQ 官方机器人（Grok Bot 专属版）
 
-基于 **QQ 开放平台官方机器人 API v2 + WebSocket 网关** 打造的多群拟人化 AI 机器人套件，专为 **Grok Bot** 云端沙盒环境设计。无需安装桌面版 QQ 或 NapCat，轻量、稳定、零封号风险，开箱即享多群独立人设、富媒体/语音/Markdown 收发、群专属知识库、**斗图表情包工坊**以及**本地零 Token 自愈守护**。
+基于 **QQ 开放平台官方机器人 API v2 + WebSocket 网关** 打造的多群拟人化 AI 机器人套件，专为 **Grok Bot** 云端沙盒环境设计。无需安装桌面版 QQ 或 NapCat，保留原有部署和 CLI 方式，提供多群独立人设、富媒体/语音/Markdown 收发、群专属知识库、**斗图表情包工坊**以及**本地零 Token 自愈守护**。
 
 ---
 
+## 本次分层升级
+
+原 CLI 参数继续兼容，新增群级插件、持久化投递与记忆存储、本机管理后台。
+完整模块边界见 [ARCHITECTURE.md](official-bot/ARCHITECTURE.md)，升级、备份和回退步骤见
+[MIGRATION.md](official-bot/MIGRATION.md)。先安装 `official-bot/requirements.txt`，再运行原启动命令。
+
+```bash
+python3 tools/check.py
+python3 official-bot/dashboard.py --port 8787
+```
+
+后台仅监听本机；用终端显示的一次性登录码登录。数据库、真实群注册表、配置、聊天记录、
+图片和密钥均保留本机。消息发送的 `unknown` 状态需要核实远端结果，不能直接盲重发。
+
 ## ✨ 核心特性
 
-1. **纯官方协议，轻量不封号**
-   - 直接连接 QQ 开放平台官方 WebSocket 网关（`wss://api.sgroup.qq.com/websocket`），告别第三方客户端掉线与风控问题。
+1. **使用官方协议**
+   - 直接连接 QQ 开放平台官方 WebSocket 网关（`wss://api.sgroup.qq.com/websocket`），无需第三方 QQ 客户端；平台权限和限额仍以实际开放能力为准。
    - 网关内置 **`op=6 RESUME` 断线补收事件**、**约 61 秒独立看门狗死链重连**、**TCP Keepalive**、**HTTP 401 自动清理并换新 Token**，以及**异步工作线程转发**（绝不阻塞网关收发心跳）。
 2. **专为 Grok Bot 环境深度定制**
    - 网关收到群聊/私聊/互动事件后，自动解析引用、图片、语音 ASR 文本、分享卡片与自定义表情包，组装成结构化 JSON 通过 **Webhook** 唤醒 **Grok Bot 例程（Routine）**。
    - Grok Bot 结合群历史上下文（`last-events.jsonl`）、群专属人设（`prompt.md`）与群长期记忆（`notes.md`）进行拟人化推理，再调用 `send_group.py` 完成回复。
 3. **多群隔离管理与专属知识库**
    - 一个机器人可同时服务多个 QQ 群，每个群拥有独立的开关配置（`config.json`）、专属人设（`prompt.md`）、长期记忆笔记（`notes.md`）与文档知识库（`knowledge/`）。
-   - 支持通过 `kb.py` 检索群内 Markdown / TXT / PDF 文档或同步公开 GitHub 仓库，严格隔离各群上下文，绝不串群。
+   - 支持通过 `kb.py` 检索群内 Markdown / TXT / PDF 文档或同步公开 GitHub 仓库，查询、插件状态和媒体按群作用域管理。
 4. **斗图表情包工坊（`make_sticker.py`）**
    - **群聊表情包自动收藏**：网关自动识别群友发送的自定义表情包并缓存至本群 `stickers/` 目录，在消息文本中标注是否已入库。
-   - **MD5 去重入库与语义检索**：支持将群友新图去重入库（`--add-sticker`），并按情绪、角色、热梗关键词检索（`--pick` / `--search`），内置最近 25 次防重复记忆。
-   - **25+ 模板动态加字 & GIF 动效**：支持二哈、柴犬、熊猫头、佩佩蛙、汤姆猫等 25 套经典底图动态排版加字，一键生成 `shake`（震动）、`zoom`（冲屏）、`bounce`（弹跳）动图。
+   - **内容去重入库与标签关键词检索**：支持将群友新图去重入库（`--add-sticker`），并按情绪、角色、热梗关键词检索（`--pick` / `--search`），内置最近 25 次防重复记忆。
+   - **模板动态加字 & GIF 动效**：使用部署时另行配置的底图动态排版加字（图片资源不在此代码仓库内），一键生成 `shake`（震动）、`zoom`（冲屏）、`bounce`（弹跳）动图。
 5. **混合双层看门狗自愈架构（零 Token 巡检 + 云端兜底）**
    - **第一层（本地零 Token 守护 `local-watchdog.py`）**：每 120 秒在容器内静默自检，消耗 **0 LLM Token**。内置**沙盒休眠唤醒防误杀机制**（检测到容器冻结唤醒后先给网关 25 秒宽限期完成 `RESUME` 补收积压消息，且唤醒后首次恢复动作强制降级为 `SIGUSR1` 热重连而非强杀）；日常超过 8.5 分钟无心跳/ACK 信号发 `SIGUSR1` 热重连，超过 11 分钟发 `SIGTERM` 重启；仅当连续故障超过 **15 分钟**仍未恢复时，才通过 Webhook 发送 `watchdog_alert` 唤醒云端通知主人。
-   - **第二层（Grok Bot 每 5 分钟云端极速保活例程）**：全天每 5 分钟执行一次轻量级进程存活检查，防止沙盒因空闲 5 分钟被平台挂起冻结，同时在容器整机重置时自动调用 `ensure-bots.sh` 恢复全部后台服务。
+   - **第二层（Grok Bot 外部定时兜底例程）**：示例按每小时检查并调用 `ensure-bots.sh`；实际频率由部署环境决定。本仓库不保证平台容器永不休眠。
 6. **白名单 Git 与预提交隐私扫描（`tools/secret-scan.sh`）**
-   - `.gitignore` 采用严格白名单机制，所有密钥、`openid`、QQ 号、群聊记录、笔记与图库文件均排除在版本控制之外，配合 `secret-scan.sh` 杜绝任何敏感信息泄露。
+   - `.gitignore` 采用严格白名单机制，所有密钥、`openid`、QQ 号、群聊记录、笔记与图库文件均排除在版本控制之外，配合只报告位置、不回显命中内容的 `secret-scan.sh` 检查提交。
 
 ---
 
-## 🏗️ 系统架构图
+## 🏗️ 外部 Grok 例程兼容链路
+
+新 core、持久化队列及后台的职责见上述架构文档；下图说明继续保留的外部调用方式。
 
 ```mermaid
 flowchart TB
@@ -215,7 +231,7 @@ tail -n 20 /workspace/qq-bot-persist/official-bot/official-ws-bridge.log
 ### 3. 每日定时例程：`群记忆压缩`（长期记忆沉淀）
 
 - **触发方式**：定时 Cron `0 22 * * *`（每天 22:00 运行）。
-- **执行逻辑**：遍历 `official-bot/groups/<group_openid>/`，阅读当日 `last-events.jsonl` 中的群聊热点、群友新装备/新梗/重要约定，精简合并进对应群的 `notes.md`，让机器人越用越懂群友。
+- **执行逻辑**：遍历 `official-bot/groups/<group_openid>/`，阅读当日 `last-events.jsonl` 中的群聊热点、群友新装备/新梗/重要约定，通过记忆服务或后台提交带来源的摘要。旧 `notes.md` 可导入，迁移后不要让外部例程覆盖数据库中的人工修改。
 
 ---
 

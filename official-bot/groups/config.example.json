@@ -6,6 +6,11 @@
   "group_openid": "<GROUP_OPENID_32_HEX>",
   "qq_group_id": null,
   "enabled": true,
+  "enabled_plugins": ["command", "kb", "sticker", "digest", "reply", "natural_reply"],
+  "plugin_bindings": {
+    "sticker": {"enabled": true, "config": {}, "quota": {"max_actions_per_day": 50}}
+  },
+  "quotas": {"max_actions_per_day": 500},
   "features": {
     "natural_reply": true,
     "at_reply": true,

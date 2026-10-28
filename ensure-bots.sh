@@ -1,61 +1,60 @@
-#!/bin/bash
-if [ ! -x /root/Napcat/opt/QQ/qq ] && [ -f /workspace/qq-bot-persist/Napcat.tar.gz ]; then
-  tar xzf /workspace/qq-bot-persist/Napcat.tar.gz -C /root
+#!/usr/bin/env bash
+# Idempotent start; installation is a deployment step, never a recovery action.
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${QQBOT_REPO_DIR:-$SCRIPT_DIR}"
+if [ ! -f "$REPO_DIR/official-bot/core/supervisor.py" ]; then
+  REPO_DIR=/workspace/qq-bot-persist
 fi
-# restore forwarder scripts from persist if missing
-if [ ! -d /root/forwarder ] && [ -d /workspace/qq-bot-persist/forwarder ]; then
-  cp -a /workspace/qq-bot-persist/forwarder /root/forwarder
+CODE_DIR="${QQBOT_CODE_DIR:-$REPO_DIR/official-bot}"
+DATA_DIR="${QQBOT_DATA_DIR:-$CODE_DIR}"
+PYTHON="${QQBOT_PYTHON:-python3}"
+export QQBOT_CODE_DIR="$CODE_DIR" QQBOT_DATA_DIR="$DATA_DIR"
+mkdir -p -- "$DATA_DIR"
+exec 9>"$DATA_DIR/ensure.lock"
+flock -n 9 || exit 0
+if ! "$PYTHON" -c 'import websocket' >/dev/null 2>&1; then
+  echo 'websocket-client missing; install official-bot/requirements.txt before starting.' >&2
+  exit 1
 fi
-# restore webhook url/key from persist (lost on machine swap)
-if [ -d /root/forwarder ]; then
-  if [ ! -f /root/forwarder/url ] && [ -f /workspace/qq-bot-persist/forwarder-url ]; then
-    cp /workspace/qq-bot-persist/forwarder-url /root/forwarder/url
-    chmod 600 /root/forwarder/url
-  fi
-  if [ ! -f /root/forwarder/key ] && [ -f /workspace/qq-bot-persist/forwarder-key ]; then
-    cp /workspace/qq-bot-persist/forwarder-key /root/forwarder/key
-    chmod 600 /root/forwarder/key
-  fi
-  # keep official bridge scripts in sync under /root/forwarder
-  if [ -f /workspace/qq-bot-persist/official-bot/official-ws-bridge.py ]; then
-    cp -f /workspace/qq-bot-persist/official-bot/official-ws-bridge.py /root/forwarder/official-ws-bridge.py
-    chmod +x /root/forwarder/official-ws-bridge.py
-  fi
-  if [ -f /workspace/qq-bot-persist/official-bot/run-official-ws.sh ]; then
-    cp -f /workspace/qq-bot-persist/official-bot/run-official-ws.sh /root/forwarder/run-official-ws.sh
-    chmod +x /root/forwarder/run-official-ws.sh
-  fi
-fi
-for f in ensure-bots.sh napcat-run.sh qq-healer.sh qr-watch.sh; do
-  if [ ! -f /root/$f ] && [ -f /workspace/qq-bot-persist/$f ]; then
-    cp /workspace/qq-bot-persist/$f /root/$f
-    chmod +x /root/$f
+for credential in appid appsecret; do
+  if [ ! -s "$DATA_DIR/$credential" ]; then
+    echo "Missing credential file: $credential" >&2
+    exit 1
   fi
 done
-# always refresh ensure-bots from persist when present
-if [ -f /workspace/qq-bot-persist/ensure-bots.sh ]; then
-  cp -f /workspace/qq-bot-persist/ensure-bots.sh /root/ensure-bots.sh
-  chmod +x /root/ensure-bots.sh
-fi
-# (xvfb only needed for NapCat; retired)
-# NapCat retired 2026-10-19 (only official MaxShenBi kept): pgrep -f /root/napcat-run.sh >/dev/null || setsid nohup /root/napcat-run.sh >/dev/null 2>&1 < /dev/null &
-# NapCat retired 2026-10-19 (only official MaxShenBi kept): pgrep -f /root/qq-healer.sh >/dev/null || setsid nohup /root/qq-healer.sh >/dev/null 2>&1 < /dev/null &
-if [ -d /root/forwarder ]; then
-  :
-# NapCat retired 2026-10-19 (only official MaxShenBi kept): pgrep -f /root/forwarder/run.sh >/dev/null || setsid nohup /root/forwarder/run.sh >/dev/null 2>&1 < /dev/null &
-  # NapCat ws-bridge: KEEP OFF while official MaxShenBi bridge is primary (avoids double replies).
-  # To re-enable NapCat forward: start bash /root/forwarder/run-ws.sh and stop official-ws.
-  # pgrep -f /root/forwarder/ws-bridge.py >/dev/null || setsid nohup bash /root/forwarder/run-ws.sh >/dev/null 2>&1 < /dev/null &
-fi
-# Ensure python websocket-client is installed (lost after container reset)
-python3 -c "import websocket" >/dev/null 2>&1 || sudo python3 -m pip install --break-system-packages websocket-client >/dev/null 2>&1
-# Official QQ bot gateway bridge (does NOT require NapCat)
-if [ -f /workspace/qq-bot-persist/official-bot/run-official-ws.sh ]; then
-  pgrep -f official-ws-bridge.py >/dev/null || setsid nohup bash /workspace/qq-bot-persist/official-bot/run-official-ws.sh >/dev/null 2>&1 < /dev/null &
-fi
-# Local zero-token watchdog (checks every 120s, alerts via webhook only on unrecoverable failure)
-if [ -f /workspace/qq-bot-persist/official-bot/run-local-watchdog.sh ]; then
-  pgrep -f local-watchdog.py >/dev/null || setsid nohup bash /workspace/qq-bot-persist/official-bot/run-local-watchdog.sh >/dev/null 2>&1 < /dev/null &
-fi
-exit 0
-
+FORWARDER="${QQBOT_FORWARDER_DIR:-/root/forwarder}"
+mkdir -p -- "$FORWARDER"
+for name in url key; do
+  source="$REPO_DIR/forwarder-$name"
+  if [ ! -s "$FORWARDER/$name" ] && [ -s "$source" ]; then
+    temporary="$(mktemp "$FORWARDER/.restore.XXXXXX")"
+    chmod 600 "$temporary"
+    cp -- "$source" "$temporary"
+    mv -f -- "$temporary" "$FORWARDER/$name"
+  fi
+done
+# Every invocation is safe: supervisors hold a lifetime role lock, including backoff.
+for role in official-ws local-watchdog; do
+  nohup bash "$CODE_DIR/run-$role.sh" </dev/null >/dev/null 2>&1 9>&- &
+done
+# Check supervisor ownership, not only a short-lived Python child.
+"$PYTHON" - "$DATA_DIR" <<'PY'
+import json, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+for _ in range(40):
+    healthy = []
+    for role in ('bridge', 'watchdog'):
+        try:
+            state = json.loads((root / f'supervisor-{role}.json').read_text())
+            healthy.append(state.get('status') == 'running' and time.time() - state['updated_at'] < 15)
+        except (OSError, ValueError, KeyError):
+            healthy.append(False)
+    if all(healthy):
+        print('Supervisors running; QQ connection readiness is reported separately in health status.')
+        raise SystemExit(0)
+    time.sleep(0.25)
+print('Supervisor startup failed; inspect bounded local logs.', file=sys.stderr)
+raise SystemExit(1)
+PY

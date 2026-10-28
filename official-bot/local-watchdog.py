@@ -3,11 +3,11 @@
 
 Runs every 120s locally:
 1. Ensures /root/forwarder/{url,key} exist (restores from persist if missing).
-2. Ensures exactly one official-ws-bridge.py process is running (starts run-official-ws.sh if 0, kills older duplicates if >1).
+2. Requests an idempotent supervisor start if the bridge is missing; never kills unrelated duplicate processes.
 3. Checks official-ws-bridge.log for recent QQ live signals ('ack ok', 'READY', 'RESUMED', 'recv ').
    - If >8.5 min without live signal: sends SIGUSR1 to trigger RESUME.
    - If still dead on next check (>10.5 min): kills bridge PID so run-official-ws.sh restarts it cleanly.
-4. Only if bridge fails repeatedly for >15 min or hits persistent auth/token errors, POSTs a
+4. Only if bridge fails repeatedly for >15 min, POSTs a
    {"post_type": "watchdog_alert", ...} payload to the Grok webhook (rate-limited to once per 30 min)
    to wake the cloud agent and notify the user.
 """
@@ -23,9 +23,13 @@ import time
 import urllib.request
 from pathlib import Path
 
-DIR = Path("/workspace/qq-bot-persist/official-bot")
-PERSIST = Path("/workspace/qq-bot-persist")
-FORWARDER = Path("/root/forwarder")
+from core.files import atomic_write_json, atomic_write_text, file_lock
+from core.settings import DATA_DIR
+
+DIR = DATA_DIR
+CODE_DIR = Path(os.environ.get("QQBOT_CODE_DIR", Path(__file__).resolve().parent))
+PERSIST = Path(os.environ.get("QQBOT_REPO_DIR", CODE_DIR.parent))
+FORWARDER = Path(os.environ.get("QQBOT_FORWARDER_DIR", "/root/forwarder"))
 BRIDGE_LOG = DIR / "official-ws-bridge.log"
 WD_LOG = DIR / "local-watchdog.log"
 STATE_FILE = DIR / "local-watchdog-state.json"
@@ -48,8 +52,8 @@ def wlog(msg: str) -> None:
             f.write(line)
         # Keep log bounded (~200KB)
         if WD_LOG.stat().st_size > 250_000:
-            lines = WD_LOG.read_text(encoding="utf-8", errors="ignore").splitlines()[-1000:]
-            WD_LOG.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            lines = tail_lines(WD_LOG, 1000)
+            atomic_write_text(WD_LOG, "\n".join(lines) + "\n")
     except Exception:
         pass
 
@@ -61,20 +65,28 @@ def rd(p: Path) -> str:
         return ""
 
 
+def tail_lines(path: Path, count: int, max_bytes: int = 131072) -> list[str]:
+    """Read a bounded suffix; slicing after read_text is not bounded I/O."""
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - max_bytes))
+        return stream.read(max_bytes).decode("utf-8", errors="replace").splitlines()[-count:]
+
+
 def ensure_forwarder_files() -> None:
     FORWARDER.mkdir(parents=True, exist_ok=True)
     for name, src_name in (("url", "forwarder-url"), ("key", "forwarder-key")):
         dst = FORWARDER / name
         src = PERSIST / src_name
         if not dst.exists() and src.exists():
-            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            atomic_write_text(dst, src.read_text(encoding="utf-8"))
             os.chmod(dst, 0o600)
             wlog(f"restored {dst} from {src}")
 
 
 def get_bridge_pids() -> list[int]:
     try:
-        out = subprocess.check_output(["pgrep", "-f", "official-ws-bridge.py"], text=True)
+        out = subprocess.check_output(["pgrep", "-f", str(CODE_DIR / "official-ws-bridge.py")], text=True)
         pids = [int(x) for x in out.strip().splitlines() if x.strip().isdigit()]
         return sorted(pids)
     except subprocess.CalledProcessError:
@@ -84,21 +96,14 @@ def get_bridge_pids() -> list[int]:
 
 
 def start_bridge() -> None:
-    try:
-        import websocket  # noqa: F401
-    except ImportError:
-        wlog("websocket-client missing, installing...")
-        subprocess.run(
-            ["sudo", "python3", "-m", "pip", "install", "--break-system-packages", "websocket-client"],
-            check=False,
-        )
     wlog("starting run-official-ws.sh")
     subprocess.Popen(
-        ["setsid", "nohup", "bash", str(DIR / "run-official-ws.sh")],
+        ["bash", str(CODE_DIR / "run-official-ws.sh")],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
+        start_new_session=True,
     )
 
 
@@ -107,7 +112,7 @@ def parse_bridge_log(now: float) -> tuple[float, list[str], list[str]]:
     if not BRIDGE_LOG.exists():
         return 999999.0, [], []
     try:
-        lines = BRIDGE_LOG.read_text(encoding="utf-8", errors="ignore").splitlines()[-250:]
+        lines = tail_lines(BRIDGE_LOG, 250)
     except Exception:
         return 999999.0, [], []
 
@@ -140,7 +145,7 @@ def send_webhook_alert(reason: str, tail_lines: list[str], state: dict) -> None:
         return
     url = rd(FORWARDER / "url") or rd(PERSIST / "forwarder-url")
     key = rd(FORWARDER / "key") or rd(PERSIST / "forwarder-key")
-    if not url.startswith("http") or not key:
+    if not url.startswith("https://") or not key:
         wlog(f"cannot send webhook alert (url/key missing): {reason}")
         return
     payload = {
@@ -184,16 +189,19 @@ def check_once(state: dict) -> None:
         pids = get_bridge_pids()
 
         if len(pids) > 1:
-            keep = pids[-1]
-            for p in pids[:-1]:
-                try:
-                    os.kill(p, signal.SIGTERM)
-                    wlog(f"killed duplicate bridge pid={p} (keeping {keep})")
-                except Exception:
-                    pass
-            pids = [keep]
+            state["gateway_status"] = "duplicate_processes"
+            state.setdefault("unhealthy_since", now)
+            if not state["unhealthy_since"]:
+                state["unhealthy_since"] = now
+            wlog("multiple bridge processes; inspect legacy wrappers (automatic PID selection disabled)")
+            if now - state["unhealthy_since"] >= ALERT_FAIL_SEC:
+                send_webhook_alert("多个网关进程，请停止旧 wrapper 后使用单实例 supervisor", [], state)
+            return
 
         if not pids:
+            state["gateway_status"] = "missing"
+            if not state.get("unhealthy_since"):
+                state["unhealthy_since"] = now
             wlog("bridge not running! starting...")
             start_bridge()
             time.sleep(6)
@@ -201,16 +209,29 @@ def check_once(state: dict) -> None:
             pids = get_bridge_pids()
             if not pids:
                 age, _, tail = parse_bridge_log(now)
-                send_webhook_alert("official-ws-bridge 进程无法拉起", tail, state)
+                if now - state["unhealthy_since"] >= ALERT_FAIL_SEC:
+                    send_webhook_alert("official-ws-bridge 进程持续无法拉起", tail, state)
             else:
                 wlog(f"bridge started pid={pids[0]}")
             return
 
         pid = pids[0]
         age, fatals, tail = parse_bridge_log(now)
+        state["bridge_pid"] = pid
+        state["last_live_age"] = age
+        state["gateway_status"] = "healthy" if age <= STALE_USR1_SEC else "stale"
+        # A connected gateway may coexist with a broken business delivery path.
+        try:
+            from core.delivery import snapshot
+            state["delivery"] = snapshot()
+        except Exception as exc:
+            state["delivery"] = {"status": "unavailable", "error_type": type(exc).__name__}
 
         if len(fatals) >= 4 and age > 180:
-            send_webhook_alert(f"bridge 连续出现鉴权/会话错误 ({len(fatals)} 次)", tail, state)
+            if not state.get("unhealthy_since"):
+                state["unhealthy_since"] = now
+            if now - state["unhealthy_since"] >= ALERT_FAIL_SEC:
+                send_webhook_alert(f"bridge 持续鉴权/会话错误 ({len(fatals)} 次)", tail, state)
             return
 
         if age <= STALE_USR1_SEC:
@@ -218,7 +239,7 @@ def check_once(state: dict) -> None:
             wlog(f"ok pid={pid} last_live={int(age)}s ago")
             return
 
-        if vm_woke or not state.get("unhealthy_since"):
+        if not state.get("unhealthy_since"):
             state["unhealthy_since"] = now
 
         unhealthy_dur = now - state["unhealthy_since"]
@@ -259,11 +280,16 @@ def main() -> None:
     while True:
         try:
             check_once(state)
-            STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+            atomic_write_json(STATE_FILE, state)
         except Exception as e:
             wlog(f"check_once error: {e!r}")
         time.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
-    main()
+    DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with file_lock(DIR / "watchdog.process.lock", timeout=0):
+            main()
+    except TimeoutError:
+        raise SystemExit("watchdog already running")

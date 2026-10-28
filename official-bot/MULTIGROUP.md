@@ -2,6 +2,15 @@
 
 一个官方机器人服务多个 QQ 群，每个群有自己的开关、风格、笔记和知识库。Zwift练功房 的行为保持不变。
 
+## 分层升级补充
+
+- 配置支持 `revision`、`enabled_plugins`、`plugin_bindings` 和 `quotas`。
+- `groups/registry.json` 自动维护登记和别名；该文件属于本机运行数据。
+- 无效配置会关闭业务处理；后台编辑使用 revision 防止覆盖并发更新。
+- `make_sticker.py --group <alias>` 明确选择本群图库，私聊按用户分目录。
+- 数据库与旧 JSONL 的迁移、回退见 [MIGRATION.md](MIGRATION.md)。
+- 完整角色/配额/插件说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
 ## 目录结构
 ```
 official-bot/
@@ -16,9 +25,9 @@ official-bot/
       knowledge/             # 文档（md/txt/pdf，可放子目录）
         repos/threebody/     # kb.py sync 拉下来的仓库
       last-events.jsonl      # 本群原始事件（上下文）
-      sent-log.jsonl, .send.lock   # 本群防重复
+      sent-log.jsonl, .send.lock   # 本群兼容记录；幂等与状态在 runtime.sqlite3
       last-forward.json      # 最近一次转给例程的 payload（排查用）
-  c2c/                       # 私聊：last-events.jsonl、sent-log.jsonl
+  c2c/<USER_OPENID>/         # 每位私聊用户独立日志和状态
   _system/last-events.jsonl  # READY 等系统事件
   last-events.jsonl, sent-log.jsonl, .send.lock  -> 软链到 Zwift 群文件夹（兼容旧例程和命令）
 ```

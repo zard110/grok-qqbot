@@ -1,0 +1,4 @@
+# Deployment-time dependency; the dashboard, storage and tests use the stdlib.
+websocket-client==1.8.0
+# Existing optional sticker rendering dependency.
+Pillow>=10.4,<13

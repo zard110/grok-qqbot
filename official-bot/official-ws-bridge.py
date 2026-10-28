@@ -14,12 +14,19 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
-DIR = Path("/workspace/qq-bot-persist/official-bot")
-if str(DIR) not in sys.path:
-    sys.path.insert(0, str(DIR))
+CODE_DIR = Path(__file__).resolve().parent
+if str(CODE_DIR) not in sys.path:
+    sys.path.insert(0, str(CODE_DIR))
+from core.settings import DATA_DIR
+from core.files import atomic_write_json, atomic_write_text, append_jsonl, file_lock
+from core.qq_client import client as qq_client
+from core.media import cache_image
+from core.delivery import DeliveryStore, GroupDispatcher, event_identity, snapshot
+DIR = DATA_DIR
 import groups as G  # noqa: E402  per-group registry
-FORWARDER = Path("/root/forwarder")
+FORWARDER = Path(os.environ.get("QQBOT_FORWARDER_DIR", "/root/forwarder"))
 LOG = DIR / "official-ws-bridge.log"
 # Local identity values live in git-ignored files next to this script (see secrets.example.md).
 def _local_int(name: str, default: int = 0) -> int:
@@ -65,33 +72,16 @@ def rd(path: Path) -> str:
 
 
 def get_token() -> str:
-    appid = rd(DIR / "appid")
-    secret = rd(DIR / "appsecret")
-    body = json.dumps({"appId": appid, "clientSecret": secret}).encode()
-    req = urllib.request.Request(
-        TOKEN_URL,
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        data = json.loads(r.read().decode())
-    token = data.get("access_token") or ""
-    if not token:
-        raise RuntimeError(f"no access_token: {data}")
-    return token
+    return qq_client.token()
 
 
 def get_gateway(token: str) -> str:
-    req = urllib.request.Request(
-        API + "/gateway",
-        headers={"Authorization": f"QQBot {token}"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as r:
-        data = json.loads(r.read().decode())
+    status, data = qq_client.request("GET", "/gateway", timeout=20)
+    if status >= 300 or not isinstance(data, dict):
+        raise RuntimeError(f"gateway HTTP status {status}")
     url = data.get("url") or ""
     if not url.startswith("wss://"):
-        raise RuntimeError(f"bad gateway: {data}")
+        raise RuntimeError("bad gateway response")
     return url
 
 
@@ -126,6 +116,7 @@ def is_at_me(d: dict, bot_openid: str, event_t: str) -> bool:
 FACE_RE = re.compile(r'<faceType=\d+,faceId="[^"]*"(?:,ext="([^"]*)")?>')
 REF_CACHE_FILE = DIR / "ref-cache.json"
 _ref_cache: dict = {}
+_ref_lock = threading.RLock()
 try:
     _ref_cache = json.loads(REF_CACHE_FILE.read_text(encoding="utf-8"))
 except Exception:
@@ -144,24 +135,24 @@ def _ext_map(d: dict) -> dict:
 def ref_cache_put(idx: str, name: str, text: str, goid: str = "") -> None:
     if not idx:
         return
-    _ref_cache[idx] = {"name": name, "text": (text or "")[:300], "ts": int(time.time()), "g": goid}
-    if len(_ref_cache) > 600:
-        for k in sorted(_ref_cache, key=lambda k: _ref_cache[k].get("ts", 0))[:200]:
-            _ref_cache.pop(k, None)
-    try:
-        REF_CACHE_FILE.write_text(json.dumps(_ref_cache, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+    with _ref_lock:
+        _ref_cache[goid + ":" + idx] = {"name": name, "text": (text or "")[:300], "ts": int(time.time()), "g": goid}
+        if len(_ref_cache) > 600:
+            for k in sorted(_ref_cache, key=lambda k: _ref_cache[k].get("ts", 0))[:200]:
+                _ref_cache.pop(k, None)
+        atomic_write_json(REF_CACHE_FILE, _ref_cache)
 
 
 def ref_lookup(idx: str, goid: str = "") -> dict | None:
     if not idx:
         return None
-    hit = _ref_cache.get(idx)
-    if hit and (not goid or not hit.get("g") or hit.get("g") == goid):
+    with _ref_lock:
+        hit = _ref_cache.get(goid + ":" + idx)
+    if hit and hit.get("g") == goid:
         return hit
     # our own sends: send_group.py stores ext_info.ref_idx in the group's sent-log.jsonl
-    sl = (G.group_dir(goid) / "sent-log.jsonl") if goid else (DIR / "sent-log.jsonl")
+    from core.files import confined_path
+    sl = (confined_path(G.C2C_DIR, goid[4:]) if goid.startswith("c2c:") else G.group_dir(goid)) / "sent-log.jsonl" if goid else DIR / "sent-log.jsonl"
     try:
         for line in reversed(open(sl, encoding="utf-8").readlines()[-300:]):
             try:
@@ -188,7 +179,7 @@ def _face_sub(m: "re.Match") -> str:
 def _att_list(atts, goid: str = "", is_face_msg: bool = False) -> tuple[list, list]:
     """normalize attachments -> (list of dicts, placeholder strings)"""
     out, ph = [], []
-    for a in atts or []:
+    for a in (atts or [])[:16]:
         if not isinstance(a, dict):
             continue
         ct = (a.get("content_type") or "").lower()
@@ -206,12 +197,11 @@ def _att_list(atts, goid: str = "", is_face_msg: bool = False) -> tuple[list, li
             local_p = ""
             if is_sticker and url and fn:
                 try:
-                    sdir = (G.group_dir(goid) if goid else G.C2C_DIR) / "stickers"
+                    from core.files import confined_path
+                    scope_dir = confined_path(G.C2C_DIR, goid[4:]) if goid.startswith("c2c:") else G.group_dir(goid) if goid else G.C2C_DIR
+                    sdir = scope_dir / "stickers"
                     sdir.mkdir(parents=True, exist_ok=True)
-                    dest = sdir / fn
-                    if not dest.exists():
-                        with urllib.request.urlopen(url, timeout=4) as r:
-                            dest.write_bytes(r.read())
+                    dest = cache_image(url, sdir)
                     if dest.exists():
                         local_p = str(dest)
                 except Exception as e:
@@ -233,7 +223,7 @@ def _att_list(atts, goid: str = "", is_face_msg: bool = False) -> tuple[list, li
                     if in_idx:
                         ph.append(f"[自定义表情包(已在库中): {local_p}]")
                     else:
-                        ph.append(f"[自定义表情包(新图未入库，请Read看图后顺手运行 python3 make_sticker.py --add-sticker {Path(local_p).name} --text '图上文字与画面描述' --category panda --tags '标签1,标签2' 收纳入库): {local_p}]")
+                        ph.append(f"[自定义表情包(新图未入库): {local_p}]")
                 else:
                     ph.append(f"[自定义表情包: {url}]" if url else "[自定义表情包]")
             else:
@@ -350,18 +340,13 @@ _token_holder = {"t": "", "at": 0.0}
 
 
 def _api_token() -> str:
-    if _token_holder["t"] and time.time() - _token_holder["at"] < 6000:
-        return _token_holder["t"]
-    _token_holder["t"] = get_token()
-    _token_holder["at"] = time.time()
-    return _token_holder["t"]
+    return qq_client.token()
 
 
 def fetch_group_name(goid: str) -> str:
     try:
-        req = urllib.request.Request(f"{API}/v2/groups/{goid}/info", headers={"Authorization": f"QQBot {_api_token()}"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            return (json.loads(r.read().decode()) or {}).get("group_name") or ""
+        status, data = qq_client.request("GET", f"/v2/groups/{goid}/info", timeout=5)
+        return data.get("group_name", "") if status < 300 and isinstance(data, dict) else ""
     except Exception as e:
         log(f"group info failed {goid[:8]}: {e}")
         return ""
@@ -393,13 +378,8 @@ def group_fields(cfg: dict | None, goid: str) -> dict:
 
 
 def save_group_event(goid: str, ev: dict) -> None:
-    try:
-        gd = G.group_dir(goid) if goid else G.SYSTEM_DIR
-        gd.mkdir(parents=True, exist_ok=True)
-        with (gd / "last-events.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    gd = G.group_dir(goid) if goid else G.SYSTEM_DIR
+    append_jsonl(gd / "last-events.jsonl", ev)
 
 
 def to_payload(outer: dict, bot_openid: str, our_group: str) -> dict | None:
@@ -411,6 +391,8 @@ def to_payload(outer: dict, bot_openid: str, our_group: str) -> dict | None:
         return None
     goid = d.get("group_openid") or d.get("group_id") or ""
     cfg = group_cfg(goid)
+    if cfg and (not cfg.get("enabled", True) or not (cfg.get("features") or {}).get("media_understanding", True)):
+        d = {**d, "attachments": []}
     author = d.get("author") or {}
     is_bot = author.get("bot") is True  # forward other bots too (from_bot=true); our own is skipped below
     # skip our own openid if present
@@ -508,14 +490,8 @@ def notice_payload(outer: dict, our_group: str) -> dict | None:
 
 def interaction_ack(token: str, iid: str, code: int = 0) -> str:
     try:
-        req = urllib.request.Request(
-            f"{API}/interactions/{iid}",
-            data=json.dumps({"code": code}).encode(),
-            method="PUT",
-            headers={"Content-Type": "application/json", "Authorization": f"QQBot {token}"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as r:
-            return str(r.status)
+        status, _ = qq_client.request("PUT", f"/interactions/{iid}", {"code": code}, timeout=3)
+        return str(status)
     except urllib.error.HTTPError as e:
         return f"{e.code} {e.read().decode()[:200]}"
     except Exception as e:
@@ -548,12 +524,12 @@ def c2c_payload(outer: dict) -> dict:
     d = outer.get("d") or {}
     author = d.get("author") or {}
     uo = author.get("user_openid") or author.get("id") or ""
-    ex = enrich(d, strip_at(d.get("content") or ""))
+    ex = enrich(d, strip_at(d.get("content") or ""), "c2c:" + uo)
     p = _base(outer, "")
     p.update({
         "post_type": "message",
         "message_type": "private",
-        "c2c_dir": str(G.C2C_DIR),
+        "c2c_dir": str(G.C2C_DIR / uo),
         "group_openid": "",
         "user_openid": uo,
         "user_id": member_user_id(uo),
@@ -599,25 +575,52 @@ def should_forward(p: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def forward(payload: dict) -> None:
+def forward(payload: dict) -> str:
+    from core.memory import MemoryStore
+    memory = MemoryStore(DIR)
+    scope = payload.get("group_openid") or "c2c:" + str(payload.get("user_openid") or payload.get("member_openid") or "system")
+    text = payload.get("text_only") or payload.get("raw_message") or ""
+    if payload.get("post_type") == "message" and text:
+        memory.add_message(scope, "in:" + str(payload.get("msg_id") or payload.get("delivery_id")), text)
+    payload["text"] = text
+    payload["context"] = memory.context(scope)
+    if payload.get("group_openid") and payload.get("post_type") in {"message", "schedule"}:
+        from core.plugins import dispatch
+        from core.action_runner import run_actions
+        decision = dispatch(payload)
+        payload["plugin_actions"] = decision["actions"]
+        if decision["errors"]:
+            log("plugin request denied: " + ",".join(decision["errors"]))
+            return "skipped"
+        if not decision["actions"]:
+            return "skipped"
+        payload["plugin_results"] = run_actions(payload, decision["actions"])
+        payload["local_actions_completed"] = bool(payload["plugin_results"])
+        # Explicit commands have already passed their own plugin permission gate.
+        local_command = bool(payload["plugin_results"])
+    else:
+        local_command = False
     ok, why = should_forward(payload)
-    if not ok:
+    if not ok and not local_command:
         log(f"gated {payload.get('post_type')} group={payload.get('group_name') or payload.get('group_openid','')[:8]}: {why}")
-        return
+        return "skipped"
     try:
         if payload.get("group_openid"):
-            (G.group_dir(payload["group_openid"]) / "last-forward.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+            atomic_write_json(G.group_dir(payload["group_openid"]) / "last-forward.json", payload)
     except Exception:
         pass
-    url = rd(FORWARDER / "url") or rd(Path("/workspace/qq-bot-persist/forwarder-url"))
-    key = rd(FORWARDER / "key") or rd(Path("/workspace/qq-bot-persist/forwarder-key"))
-    if not url.startswith("http") or not key or key.startswith("PLACEHOLDER"):
+    url = rd(FORWARDER / "url") or rd(DIR.parent / "forwarder-url")
+    key = rd(FORWARDER / "key") or rd(DIR.parent / "forwarder-key")
+    if not url.startswith("https://") or not key or key.startswith("PLACEHOLDER"):
         log("skip forward: url/key missing")
-        return
+        return "failed"
     body = json.dumps(payload, ensure_ascii=False).encode()
     mid = payload.get("message_id")
     try:
+        for action in payload.get("plugin_actions", []):
+            current = G.load_config(action["group_openid"])
+            if not current or current["revision"] != action["config_revision"] or not G.plugin_enabled(action["group_openid"], action["plugin_id"]):
+                return "skipped"
         req = urllib.request.Request(
             url,
             data=body,
@@ -625,12 +628,21 @@ def forward(payload: dict) -> None:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer " + key,
+                "Idempotency-Key": payload.get("delivery_id", ""),
             },
         )
-        with urllib.request.urlopen(req, timeout=20) as r:
+        class NoWebhookRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                raise ValueError("Webhook redirects are not allowed")
+        with urllib.request.build_opener(NoWebhookRedirect()).open(req, timeout=20) as r:
             log(f"forwarded {payload.get('post_type')} mid={mid or payload.get('event_id')} at_me={payload.get('at_me')} -> {r.status}")
+            return "accepted"
+    except urllib.error.HTTPError as e:
+        log(f"forward rejected HTTP {e.code}")
+        return "failed" if e.code < 500 else "unknown"
     except Exception as e:
-        log(f"forward error mid={mid}: {e}")
+        log(f"forward outcome unknown mid={mid}")
+        return "unknown"
 
 
 class Bridge:
@@ -665,13 +677,17 @@ class Bridge:
         self.resume_failures = 0
         self.force_identify = False
         self.close_code = None
-        self.q: "queue.Queue[dict]" = queue.Queue()
-        threading.Thread(target=self._worker, daemon=True, name="dispatch").start()
+        self.store = DeliveryStore()
+        self.store.recover()
+        self.q = GroupDispatcher(self.store, self._dispatch, workers=4)
+        self.ack_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="interaction-ack")
+        self.ack_slots = threading.BoundedSemaphore(32)
+        self.last_event_at = 0.0
+        self.last_dispatch_at = 0.0
+        self.connected = False
 
     # ---------- helpers ----------
     def ensure_token(self) -> str:
-        if self.token and (time.time() - self.token_at) < 6000:
-            return self.token
         self.token = get_token()
         self.token_at = time.time()
         return self.token
@@ -739,12 +755,16 @@ class Bridge:
 
     # ---------- websocket callbacks ----------
     def on_open(self, ws) -> None:
+        self.connected = True
         log("ws open")
         self.last_ack = time.time()
         self.ack_count = 0
         threading.Thread(target=self._watchdog_loop, args=(ws, self._stop), daemon=True, name="watchdog").start()
 
     def on_message(self, ws, message: str) -> None:
+        if len(message) > 1024 * 1024:
+            self._kill_socket(ws, "gateway message exceeds configured limit")
+            return
         try:
             ev = json.loads(message)
         except Exception:
@@ -754,12 +774,11 @@ class Bridge:
             now = time.time()
             self.last_ack = now
             self.ack_count += 1
+            self.write_health()
             if self.ack_count == 1 or self.ack_count % self.ACK_LOG_EVERY == 0:
                 rtt = int((now - self.last_hb_sent) * 1000) if self.last_hb_sent else -1
                 log(f"ack ok n={self.ack_count} seq={self.seq} rtt={rtt}ms")
             return
-        if op == 0 and ev.get("s") is not None:
-            self.seq = ev["s"]
         if op == 10:  # Hello
             self.last_ack = time.time()
             hi = (ev.get("d") or {}).get("heartbeat_interval") or 41250
@@ -786,6 +805,7 @@ class Bridge:
         if op == 0:
             t = ev.get("t") or ""
             if t == "READY":
+                self.seq = ev.get("s", self.seq)
                 d = ev.get("d") or {}
                 self.session_id = d.get("session_id")
                 self.resuming = False
@@ -795,11 +815,25 @@ class Bridge:
                 save_group_event("", ev)  # _system/last-events.jsonl
                 return
             if t == "RESUMED":
+                self.seq = ev.get("s", self.seq)
                 self.resuming = False
                 self.resume_failures = 0
                 log(f"RESUMED session={self.session_id} seq={self.seq}")
                 return
-            self.q.put(ev)
+            try:
+                self.q.put(ev)  # durable commit precedes the gateway resume cursor
+            except Exception:
+                self._kill_socket(ws, "durable inbox unavailable")
+                raise
+            self.seq = ev.get("s", self.seq)
+            self.last_event_at = time.time()
+            if t == "INTERACTION_CREATE":
+                iid = (ev.get("d") or {}).get("id") or ev.get("id")
+                if iid and self.ack_slots.acquire(blocking=False):
+                    self.ack_pool.submit(self._ack_interaction, iid)
+                else:
+                    log("interaction ACK capacity exceeded or id missing")
+            self.write_health()
             return
         if op == 7:  # server asks us to reconnect (e.g. 4009 session timed out) -> RESUME
             log("op7 reconnect requested (will RESUME)")
@@ -817,20 +851,32 @@ class Bridge:
         log(f"ws error: {err!r}")
 
     def on_close(self, ws, code=None, reason=None, *a) -> None:
+        self.connected = False
+        self.write_health()
         log(f"ws closed code={code} reason={reason!r}")
         self.close_code = code
         self._stop.set()
 
     # ---------- dispatch worker ----------
-    def _worker(self) -> None:
-        while True:
-            ev = self.q.get()
-            try:
-                self._dispatch(ev)
-            except Exception as e:
-                log(f"dispatch error t={ev.get('t')}: {e!r}")
+    def _ack_interaction(self, iid):
+        try:
+            log(f"INTERACTION ack={interaction_ack(self.ensure_token(), iid)}")
+        finally:
+            self.ack_slots.release()
+
+    def write_health(self):
+        try:
+            atomic_write_json(DIR / "health.json", {
+                "updated_at": time.time(), "gateway_connected": self.connected,
+                "last_ack_at": self.last_ack, "last_event_at": self.last_event_at,
+                "last_dispatch_at": self.last_dispatch_at,
+                "dispatcher_error": self.q.last_error, **snapshot(self.store.path),
+            })
+        except Exception:
+            log("health publication failed")
 
     def _dispatch(self, ev: dict) -> None:
+        self.last_dispatch_at = time.time()
         t = ev.get("t") or ""
         if t in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
             d = ev.get("d") or {}
@@ -841,7 +887,7 @@ class Bridge:
                     if m["id"] != self.bot_openid:
                         self.bot_openid = m["id"]
                         try:
-                            (DIR / "bot_openid.txt").write_text(self.bot_openid + "\n")
+                            atomic_write_text(DIR / "bot_openid.txt", self.bot_openid + "\n")
                         except Exception:
                             pass
                     break
@@ -852,7 +898,8 @@ class Bridge:
                     f"from={payload.get('sender', {}).get('nickname')} "
                     f"at_me={payload['at_me']} text={payload['raw_message'][:80]!r}"
                 )
-                forward(payload)
+                payload["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
+                return forward(payload)
             else:
                 goid = (d.get("group_openid") or d.get("group_id") or "")[:16]
                 log(f"skip {t} group={goid}...")
@@ -860,28 +907,27 @@ class Bridge:
         if t == "INTERACTION_CREATE":
             d = ev.get("d") or {}
             iid = d.get("id") or ev.get("id") or ""
-            try:
-                ack = interaction_ack(self.ensure_token(), iid) if iid else "no-id"
-            except Exception as e:
-                ack = f"err {e}"
-            log(f"INTERACTION type={d.get('type')} ack={ack} data={json.dumps(d.get('data'), ensure_ascii=False)[:200]}")
+            log(f"INTERACTION type={d.get('type')} queued independently of ACK")
             self._save_event(ev)
             p = interaction_payload(ev, self.our_group)
             if p:
-                forward(p)
+                p["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
+                return forward(p)
             return
         if t in NOTICE_EVENTS:
             log(f"notice {t} raw={json.dumps(ev.get('d'), ensure_ascii=False)[:200]}")
             self._save_event(ev)
             p = notice_payload(ev, self.our_group)
             if p:
-                forward(p)
+                p["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
+                return forward(p)
             return
         if t == "C2C_MESSAGE_CREATE":
             self._save_event(ev)
             p = c2c_payload(ev)
             log(f"recv C2C from={p['sender']['nickname']} text={p['raw_message'][:80]!r}")
-            forward(p)
+            p["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
+            return forward(p)
             return
         log(f"event {t} raw={json.dumps(ev, ensure_ascii=False)[:300]}")
 
@@ -891,22 +937,17 @@ class Bridge:
         if goid:
             save_group_event(goid, ev)
             return
-        try:
-            G.C2C_DIR.mkdir(parents=True, exist_ok=True)
-            with (G.C2C_DIR / "last-events.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        author = d.get("author") or {}
+        user = author.get("user_openid") or author.get("id") or d.get("user_openid") or "system"
+        from core.files import confined_path
+        append_jsonl(confined_path(G.C2C_DIR, str(user)) / "last-events.jsonl", ev)
 
     # ---------- main loop ----------
     def run_forever(self) -> None:
         try:
             import websocket
         except ImportError:
-            import subprocess
-
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "websocket-client"])
-            import websocket
+            raise RuntimeError("Install pinned dependencies before starting the gateway") from None
         websocket.setdefaulttimeout(self.SOCK_TIMEOUT)
         sockopt = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
         for name, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
@@ -937,6 +978,7 @@ class Bridge:
                 if "401" in str(e):
                     # cached access token went stale: drop it so the next try fetches a fresh one
                     self.token = ""
+                    qq_client.invalidate_token()
                     self.token_at = 0.0
                     _token_holder["t"] = ""
                     _token_holder["at"] = 0.0
@@ -978,4 +1020,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        with file_lock(DIR / "bridge.process.lock", timeout=0):
+            main()
+    except TimeoutError:
+        raise SystemExit("A bridge already owns this data directory")

@@ -13,10 +13,12 @@
 
 # --- top level ---
 !/.gitignore
+!/.gitattributes
 !/README.md
 !/ensure-bots.sh
 !/tools/
 !/tools/secret-scan.sh
+!/tools/check.py
 
 # --- official bot code ---
 !/official-bot/official-ws-bridge.py
@@ -29,6 +31,15 @@
 !/official-bot/run-official-ws.sh
 !/official-bot/intents.txt
 !/official-bot/tests/intent_probe.py
+!/official-bot/tests/test_*.py
+!/official-bot/core/*.py
+!/official-bot/plugins/*.py
+!/official-bot/dashboard.py
+!/official-bot/dashboard-static/*.html
+!/official-bot/dashboard-static/*.css
+!/official-bot/dashboard-static/*.js
+!/official-bot/dashboard/*.html
+!/official-bot/requirements.txt
 !/official-bot/keyboards/*.json
 
 # --- docs ---
@@ -37,6 +48,8 @@
 !/official-bot/MULTIGROUP.md
 !/official-bot/docs-explore.md
 !/official-bot/secrets.example.md
+!/official-bot/ARCHITECTURE.md
+!/official-bot/MIGRATION.md
 
 # --- sanitized templates (real per-group config.json stays local) ---
 !/official-bot/groups/_default/config.json
@@ -50,3 +63,9 @@
 *.lock
 __pycache__/
 *.pyc
+*.sqlite3*
+*.db*
+/official-bot/groups/registry.json
+/official-bot/*health*.json
+/official-bot/supervisor-*.json
+/official-bot/dashboard-session*
