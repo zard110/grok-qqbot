@@ -190,13 +190,15 @@ def check_once(state: dict) -> None:
 
         if len(pids) > 1:
             state["gateway_status"] = "duplicate_processes"
-            state.setdefault("unhealthy_since", now)
-            if not state["unhealthy_since"]:
-                state["unhealthy_since"] = now
-            wlog("multiple bridge processes; inspect legacy wrappers (automatic PID selection disabled)")
-            if now - state["unhealthy_since"] >= ALERT_FAIL_SEC:
-                send_webhook_alert("多个网关进程，请停止旧 wrapper 后使用单实例 supervisor", [], state)
-            return
+            keep = pids[-1]
+            stale_pids = pids[:-1]
+            wlog(f"killing duplicate bridge pids={stale_pids}, keeping {keep}")
+            for sp in stale_pids:
+                try:
+                    os.kill(sp, signal.SIGTERM)
+                except Exception:
+                    pass
+            pids = [keep]
 
         if not pids:
             state["gateway_status"] = "missing"

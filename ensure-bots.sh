@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent start; installation is a deployment step, never a recovery action.
 set -euo pipefail
+umask 0000
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${QQBOT_REPO_DIR:-$SCRIPT_DIR}"
 if [ ! -f "$REPO_DIR/official-bot/core/supervisor.py" ]; then
@@ -11,6 +12,7 @@ DATA_DIR="${QQBOT_DATA_DIR:-$CODE_DIR}"
 PYTHON="${QQBOT_PYTHON:-python3}"
 export QQBOT_CODE_DIR="$CODE_DIR" QQBOT_DATA_DIR="$DATA_DIR"
 mkdir -p -- "$DATA_DIR"
+chmod -R a+rwX "$DATA_DIR" 2>/dev/null || true
 exec 9>"$DATA_DIR/ensure.lock"
 flock -n 9 || exit 0
 if ! "$PYTHON" -c 'import websocket' >/dev/null 2>&1; then

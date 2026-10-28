@@ -378,14 +378,14 @@ def main() -> None:
     media_identity = []
     for kind, source in media:
         media_identity.append([kind, source if source.startswith(("http://", "https://")) else hashlib.sha256(read_local(source)).hexdigest()])
-    trigger = args.msg_id or args.event_id or int(time.time() // WINDOW)
+    trigger = args.msg_id or args.event_id or (time.time_ns() if args.force else int(time.time() // WINDOW))
     action_id = stable_id([base, args.action_id]) if args.action_id else stable_id([base, trigger, plan, media_identity, args.reply_to])
     store = DeliveryStore()
     with file_lock(LOCK, timeout=180):
         if scope == "group" and (recent_sends() or store.recent_actions(base)) and not args.force:
             print(json.dumps({"skipped": True, "reason": "Group cooldown active", "recent": recent_sends()}))
             raise SystemExit(3)
-        reserved, previous = store.reserve_action(action_id, base, stable_id([plan, media_identity, args.reply_to, args.msg_id, args.event_id]))
+        reserved, previous = store.reserve_action(action_id, base, stable_id([plan, media_identity, args.reply_to, args.msg_id, args.event_id]), force=bool(args.force))
         if not reserved:
             status = previous["status"]
             if status in {"pending", "inflight"}:

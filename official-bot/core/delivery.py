@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
+from .files import ensure_shared_perms
 from .settings import DATA_DIR
 
 
@@ -46,6 +47,8 @@ class DeliveryStore:
             """)
             if "request_hash" not in {row[1] for row in db.execute("PRAGMA table_info(outbox)")}:
                 db.execute("ALTER TABLE outbox ADD COLUMN request_hash TEXT")
+        for suffix in ("", "-wal", "-shm"):
+            ensure_shared_perms(Path(str(self.path) + suffix))
 
     @contextmanager
     def connect(self):
@@ -86,15 +89,19 @@ class DeliveryStore:
         with self.connect() as db:
             db.execute("UPDATE inbox SET status=?,error=?,updated=? WHERE id=?", (status, error, time.time(), identity))
 
-    def reserve_action(self, identity: str, scope: str, request_hash: str | None = None) -> tuple[bool, dict]:
+    def reserve_action(self, identity: str, scope: str, request_hash: str | None = None, *, force: bool = False) -> tuple[bool, dict]:
         now = time.time()
         with self.connect() as db:
             added = db.execute("INSERT OR IGNORE INTO outbox(id,scope,status,created,updated,request_hash) VALUES(?,?,'pending',?,?,?)", (identity, scope, now, now, request_hash)).rowcount == 1
             row = dict(db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone())
             if row["scope"] != scope:
                 raise ValueError("Action identity belongs to another scope")
-            if request_hash is not None and row["request_hash"] != request_hash:
+            if request_hash is not None and row["request_hash"] != request_hash and not force:
                 raise ValueError("Action identity was already used for different content")
+            if not added and force and row["status"] in {"unknown", "failed", "pending"}:
+                db.execute("UPDATE outbox SET status='pending',updated=?,request_hash=? WHERE id=?", (now, request_hash, identity))
+                row = dict(db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone())
+                return True, row
             # Existing pending/inflight/unknown actions must not be resent blindly.
             return added, row
 
@@ -106,7 +113,7 @@ class DeliveryStore:
 
     def recent_actions(self, scope: str, window: float = 120):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT id,status,updated FROM outbox WHERE scope=? AND updated>? AND status IN ('pending','inflight','sent','unknown','partial') ORDER BY updated DESC LIMIT 20", (scope, time.time() - window))]
+            return [dict(row) for row in db.execute("SELECT id,status,updated FROM outbox WHERE scope=? AND updated>? AND status IN ('inflight','sent','partial') ORDER BY updated DESC LIMIT 20", (scope, time.time() - window))]
 
     def part_status(self, identity: str, part: int, status: str, detail=None):
         with self.connect() as db:

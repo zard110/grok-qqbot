@@ -89,15 +89,16 @@ class SupervisionTests(unittest.TestCase):
             watchdog.check_once(state)
             alert.assert_called_once()
 
-    def test_duplicate_pids_are_reported_without_killing_arbitrary_child(self):
+    def test_duplicate_pids_cleans_up_older_duplicates_and_keeps_newest(self):
         with patch.object(watchdog, "ensure_forwarder_files"), \
              patch.object(watchdog, "get_bridge_pids", return_value=[123, 456]), \
+             patch.object(watchdog, "parse_bridge_log", return_value=(10.0, [], [])), \
              patch.object(watchdog, "wlog"), \
              patch.object(watchdog.os, "kill") as kill:
             state = {}
             watchdog.check_once(state)
-            kill.assert_not_called()
-            self.assertEqual(state["gateway_status"], "duplicate_processes")
+            kill.assert_called_once_with(123, watchdog.signal.SIGTERM)
+            self.assertEqual(state["bridge_pid"], 456)
 
 
 if __name__ == "__main__":

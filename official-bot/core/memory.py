@@ -13,7 +13,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from .files import confined_path
+from .files import confined_path, ensure_shared_perms
 
 
 class MemoryConflict(ValueError):
@@ -97,6 +97,8 @@ class MemoryStore:
                     self._ensure_fts(db)
                 except sqlite3.OperationalError:
                     self.fts = False
+        for suffix in ("", "-wal", "-shm"):
+            ensure_shared_perms(Path(str(self.path) + suffix))
 
     def _ensure_fts(self, db):
         state = db.execute("SELECT value FROM memory_meta WHERE key='fts_ready'").fetchone()

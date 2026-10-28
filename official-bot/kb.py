@@ -188,16 +188,18 @@ def cmd_add_doc(goid, cfg, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--group')
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument('--group', default=argparse.SUPPRESS)
+    parser = argparse.ArgumentParser(description=__doc__, parents=[parent])
+    parser.set_defaults(group=None)
     sub = parser.add_subparsers(dest='cmd', required=True)
-    search = sub.add_parser('search'); search.add_argument('query')
+    search = sub.add_parser('search', parents=[parent]); search.add_argument('query')
     search.add_argument('--max', type=int, default=20); search.add_argument('--context', type=int, default=1); search.add_argument('--json', action='store_true')
     for name in ('sync', 'list', 'import-legacy', 'context'):
-        sub.add_parser(name)
+        sub.add_parser(name, parents=[parent])
     for name in ('add-doc', 'remove', 'export', 'import'):
-        sub.add_parser(name).add_argument('path')
-    rollback = sub.add_parser('rollback'); rollback.add_argument('path'); rollback.add_argument('revision', type=int)
+        sub.add_parser(name, parents=[parent]).add_argument('path')
+    rollback = sub.add_parser('rollback', parents=[parent]); rollback.add_argument('path'); rollback.add_argument('revision', type=int)
     args = parser.parse_args()
     try:
         goid = G.resolve(args.group); cfg = G.load_config(goid)

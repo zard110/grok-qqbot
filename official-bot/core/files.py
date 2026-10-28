@@ -12,6 +12,20 @@ from pathlib import Path
 _locks: dict[str, threading.RLock] = {}
 _guard = threading.Lock()
 _held = threading.local()
+if os.name != "nt":
+    try:
+        os.umask(0)
+    except OSError:
+        pass
+
+
+def ensure_shared_perms(path: Path | str, *, is_dir: bool = False) -> None:
+    if os.name == "nt":
+        return
+    try:
+        os.chmod(path, 0o777 if is_dir else 0o666)
+    except OSError:
+        pass
 
 
 def confined_path(root: Path, relative: str | Path) -> Path:
@@ -43,7 +57,9 @@ def file_lock(path: Path | str, timeout: float = 30):
             yield
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_shared_perms(path.parent, is_dir=True)
         handle = path.open("a+b")
+        ensure_shared_perms(path)
         if os.name == "nt":
             import msvcrt
             if path.stat().st_size == 0:
@@ -89,7 +105,9 @@ def atomic_write_bytes(path: Path | str, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        ensure_shared_perms(temporary)
         os.replace(temporary, path)
+        ensure_shared_perms(path)
         if os.name != "nt" and hasattr(os, "O_DIRECTORY"):
             directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -116,3 +134,4 @@ def append_jsonl(path: Path | str, record: dict) -> None:
         with path.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
             stream.flush()
+        ensure_shared_perms(path)

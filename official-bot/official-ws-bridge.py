@@ -223,7 +223,7 @@ def _att_list(atts, goid: str = "", is_face_msg: bool = False) -> tuple[list, li
                     if in_idx:
                         ph.append(f"[自定义表情包(已在库中): {local_p}]")
                     else:
-                        ph.append(f"[自定义表情包(新图未入库): {local_p}]")
+                        ph.append(f'[自定义表情包(新图未入库，请Read看图后顺手运行 python3 /workspace/qq-bot-persist/official-bot/make_sticker.py --add-sticker {local_p} --text "<图中文字或无>" --category "<分类>" --tags "<标签1>,<标签2>" 收纳入库): {local_p}]')
                 else:
                     ph.append(f"[自定义表情包: {url}]" if url else "[自定义表情包]")
             else:
@@ -590,14 +590,22 @@ def forward(payload: dict) -> str:
         decision = dispatch(payload)
         payload["plugin_actions"] = decision["actions"]
         if decision["errors"]:
-            log("plugin request denied: " + ",".join(decision["errors"]))
+            if decision["errors"] == ["command:PermissionError"]:
+                log("plugin command not authorized locally; forwarding to webhook: " + ",".join(decision["errors"]))
+                payload["plugin_errors"] = decision["errors"]
+                payload["plugin_results"] = []
+                payload["local_actions_completed"] = False
+                local_command = False
+            else:
+                log("plugin request denied: " + ",".join(decision["errors"]))
+                return "skipped"
+        elif not decision["actions"]:
             return "skipped"
-        if not decision["actions"]:
-            return "skipped"
-        payload["plugin_results"] = run_actions(payload, decision["actions"])
-        payload["local_actions_completed"] = bool(payload["plugin_results"])
-        # Explicit commands have already passed their own plugin permission gate.
-        local_command = bool(payload["plugin_results"])
+        else:
+            payload["plugin_results"] = run_actions(payload, decision["actions"])
+            payload["local_actions_completed"] = bool(payload["plugin_results"])
+            # Explicit commands have already passed their own plugin permission gate.
+            local_command = bool(payload["plugin_results"])
     else:
         local_command = False
     ok, why = should_forward(payload)

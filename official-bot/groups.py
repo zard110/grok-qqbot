@@ -28,7 +28,7 @@ FALLBACK_DEFAULT = {
                  "welcome": False, "media_understanding": True, "knowledge": True},
     "style": "礼貌、简洁，用中文回答；只在被 @ 时回复。",
     "admins": [], "knowledge": {"docs_dir": "knowledge/", "repos": []},
-    "auto_created": True, "plugin_bindings": {}, "quotas": {"max_actions_per_day": 500},
+    "auto_created": True, "plugin_bindings": {}, "quotas": {"max_actions_per_day": 50000},
 }
 
 
@@ -311,3 +311,58 @@ def authorize(goid: str, plugin_id: str, action: str, actor: str = "", *, owner:
     allowed = cfg["plugin_bindings"].get(plugin_id, {}).get("permissions")
     if allowed is not None and action not in allowed:
         raise PermissionError("Plugin capability is not granted")
+
+
+def _cli() -> None:
+    import sys
+    args = sys.argv[1:]
+    cmd = args[0] if args else "list"
+    if cmd == "list":
+        dgo = default_group_openid()
+        for c in all_groups():
+            mark = "*" if c["group_openid"] == dgo else " "
+            en = "ON " if c.get("enabled") else "OFF"
+            fn = [k for k, v in (c.get("features") or {}).items() if v]
+            print(f"{mark} [{en}] {c['group_openid']}  name={c.get('name')!r}  aliases={c.get('aliases')}  features={fn}")
+    elif cmd == "show":
+        goid = resolve(args[1] if len(args) > 1 else None)
+        print(json.dumps(load_config(goid), ensure_ascii=False, indent=2))
+    elif cmd in ("enable", "disable"):
+        goid = resolve(args[1])
+        update_config(goid, enabled=(cmd == "enable"))
+        print(f"{goid} enabled={cmd == 'enable'}")
+    elif cmd == "feature":
+        goid = resolve(args[1])
+        c = load_config(goid) or default_config()
+        f = dict(c.get("features") or {})
+        for kv in args[2:]:
+            k, v = kv.split("=", 1)
+            f[k] = v.lower() in ("1", "true", "on", "yes")
+        update_config(goid, features=f)
+        print(json.dumps(load_config(goid)["features"], ensure_ascii=False, indent=2))
+    elif cmd == "set":
+        goid = resolve(args[1])
+        patch = {}
+        for kv in args[2:]:
+            k, v = kv.split("=", 1)
+            try:
+                patch[k] = json.loads(v)
+            except Exception:
+                patch[k] = v
+        update_config(goid, **patch)
+        print(json.dumps(load_config(goid), ensure_ascii=False, indent=2))
+    elif cmd == "init":
+        goid = args[1].strip().upper()
+        name = args[2] if len(args) > 2 else ""
+        alias = args[3] if len(args) > 3 else ""
+        c, created = ensure_group(goid, name)
+        if name or alias:
+            aliases = list(dict.fromkeys((c.get("aliases") or []) + ([alias] if alias else [])))
+            update_config(goid, name=name or c.get("name"), aliases=aliases)
+        print(f"inited {goid} (created={created}):", json.dumps(load_config(goid), ensure_ascii=False, indent=2))
+    else:
+        raise SystemExit("usage: groups.py [list | show [group] | enable <group> | disable <group> | feature <group> k=true ... | set <group> k=json ... | init <OPENID> [name] [alias]]")
+
+
+if __name__ == "__main__":
+    _cli()
