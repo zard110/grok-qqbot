@@ -939,8 +939,7 @@ class Bridge:
                 payload["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
                 is_sticker = "[自定义表情包" in (payload.get("raw_message") or "")
                 if payload.get("group_openid") and payload.get("member_openid") and not is_sticker and hasattr(self, "store"):
-                    pure_image = bool(payload.get("attachments")) and not (payload.get("text_only") or "").strip()
-                    wait_sec = 3.5 if (pure_image and not payload.get("at_me")) else (1.2 if not payload.get("at_me") else 0.0)
+                    wait_sec = 3.5 if not payload.get("at_me") else 0.0
                     deadline = time.time() + wait_sec
                     scope_key = "group:" + str(payload["group_openid"])
                     while time.time() < deadline:
