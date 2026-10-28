@@ -143,11 +143,43 @@ class DeliveryStore:
             # Existing pending/inflight/unknown actions must not be resent blindly.
             return added, row
 
+    def claim_followup(self, scope: str, member_openid: str) -> dict | None:
+        """Atomically claim a pending follow-up group message from the same sender for burst coalescing."""
+        if not scope or not member_openid:
+            return None
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT id, payload FROM inbox WHERE scope=? AND status='pending' ORDER BY created, rowid LIMIT 5",
+                (scope,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    ev = json.loads(row["payload"])
+                except Exception:
+                    continue
+                if ev.get("t") not in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
+                    break
+                d = ev.get("d") or {}
+                author = (d.get("author") or {}) if isinstance(d, dict) else {}
+                aoid = author.get("member_openid") or author.get("id") or ""
+                if aoid != member_openid:
+                    break
+                if db.execute(
+                    "UPDATE inbox SET status='accepted', error='coalesced_into_previous', updated=? WHERE id=? AND status='pending'",
+                    (time.time(), row["id"]),
+                ).rowcount == 1:
+                    ev["_delivery_id"] = row["id"]
+                    return ev
+        return None
+
     def admit_natural(self, scope: str, topic: str, tokens: list[str], window: float) -> bool:
         """Leading-edge debounce: log every inbound event, forward only one burst.
 
         This does not sleep or delay gateway ACKs. No semantic claim beyond token similarity.
         """
+        if window <= 0 or (not topic and not tokens):
+            return True
         now = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")

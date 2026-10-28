@@ -40,7 +40,7 @@
   },
   "reply_policy": {
     "inbound_debounce": 0,
-    "natural_cooldown": 0,
+    "natural_cooldown": 15,
     "question_cooldown": 0,
     "topic_window": 0,
     "sticker_cooldown": 0,

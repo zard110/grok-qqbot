@@ -48,9 +48,14 @@ def same_topic(left, right) -> bool:
     return bool(a and b and len(a & b) >= 2 and len(a & b) / len(a | b) >= .65)
 
 
+def _clean_text(text: str) -> str:
+    return re.sub(r"https?://\S+|<faceType=[^>]*>|\[(?:自定义表情包|图片|语音|视频|附件)[^\]]*\]", " ", str(text or "")).strip()
+
+
 def event_context(event: dict) -> dict:
-    text = str(event.get("text_only") or event.get("text") or event.get("raw_message") or "")
-    trigger = "at" if event.get("at_me") else "command" if text.strip().startswith("/") else "question" if (
+    raw = str(event.get("text_only") or event.get("text") or event.get("raw_message") or "")
+    text = _clean_text(raw)
+    trigger = "at" if event.get("at_me") else "command" if text.startswith("/") else "question" if (
         QUESTION.search(text) or REQUEST.search(text)) else "natural"
     source = str(event.get("msg_id") or event.get("message_id") or event.get("event_id") or event.get("delivery_id") or "")
     tokens = topic_tokens(text)
@@ -88,7 +93,7 @@ def denial(db, scope, action_id, meta, limits, now, force=False):
         return "duplicate_content"
     if not force:
         if meta["trigger"] == "natural" and not meta["sticker"] and limits["natural_cooldown"] > 0 and db.execute("""SELECT 1 FROM outbox WHERE scope=? AND id!=?
-                AND updated>? AND status IN ('inflight','sent','partial') LIMIT 1""",
+                AND updated>? AND status IN ('pending','inflight','sent','partial') LIMIT 1""",
                 (scope, action_id, now - limits["natural_cooldown"])).fetchone():
             return "natural_cooldown"
         if meta["sticker"]:

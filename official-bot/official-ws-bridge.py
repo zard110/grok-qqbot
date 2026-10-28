@@ -936,12 +936,34 @@ class Bridge:
                     break
             payload = to_payload(ev, self.bot_openid, self.our_group)
             if payload:
+                payload["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
+                is_sticker = "[自定义表情包" in (payload.get("raw_message") or "")
+                if payload.get("group_openid") and payload.get("member_openid") and not is_sticker and hasattr(self, "store"):
+                    pure_image = bool(payload.get("attachments")) and not (payload.get("text_only") or "").strip()
+                    wait_sec = 3.5 if (pure_image and not payload.get("at_me")) else (1.2 if not payload.get("at_me") else 0.0)
+                    deadline = time.time() + wait_sec
+                    scope_key = "group:" + str(payload["group_openid"])
+                    while time.time() < deadline:
+                        nxt = self.store.claim_followup(scope_key, payload["member_openid"])
+                        if nxt:
+                            save_group_event(payload["group_openid"], nxt)
+                            p2 = to_payload(nxt, self.bot_openid, self.our_group)
+                            if p2 and "[自定义表情包" not in (p2.get("raw_message") or ""):
+                                payload["raw_message"] = (payload.get("raw_message") or "") + "\n" + (p2.get("raw_message") or "")
+                                payload["text_only"] = "\n".join(x for x in ((payload.get("text_only") or "").strip(), (p2.get("text_only") or "").strip()) if x)
+                                payload["attachments"] = (payload.get("attachments") or []) + (p2.get("attachments") or [])
+                                payload["message"] = (payload.get("message") or []) + (p2.get("message") or [])
+                                payload["msg_id"] = p2.get("msg_id") or payload.get("msg_id")
+                                payload["message_id"] = p2.get("message_id") or payload.get("message_id")
+                                payload["at_me"] = bool(payload.get("at_me") or p2.get("at_me"))
+                                deadline = min(deadline + 1.0, time.time() + 1.5)
+                                continue
+                        time.sleep(0.25)
                 log(
                     f"recv {t} s={ev.get('s')} [{payload.get('group_alias') or payload.get('group_name') or payload['group_openid'][:8]}] "
                     f"from={payload.get('sender', {}).get('nickname')} "
                     f"at_me={payload['at_me']} text={payload['raw_message'][:80]!r}"
                 )
-                payload["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
                 return forward(payload)
             else:
                 goid = (d.get("group_openid") or d.get("group_id") or "")[:16]
