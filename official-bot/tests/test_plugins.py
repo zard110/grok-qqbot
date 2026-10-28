@@ -62,6 +62,18 @@ class PluginTests(GroupFixture):
         accepted_id = next(str(i) for i, accepted in enumerate(results) if accepted)
         self.assertTrue(reserve_quota(A, "command", accepted_id))
 
+    def test_continuation_uses_original_plugin_and_quota(self):
+        registry = PluginRegistry()
+        self.addCleanup(registry.stop)
+        event = {"group_openid": A, "post_type": "message", "at_me": False, "text": "第二个",
+                 "member_openid": "alice", "msg_id": "followup", "dialogue": {"route_plugin": "reply"}}
+        G.update_config(A, quotas={"max_actions_per_day": 1})
+        result = registry.dispatch(event)
+        self.assertEqual(result["actions"][0]["plugin_id"], "reply")
+        self.assertEqual(registry.dispatch({**event, "msg_id": "next"})["errors"], ["quota_exceeded"])
+        G.set_plugin_enabled(A, "reply", False)
+        self.assertEqual(registry.dispatch(event)["errors"], ["plugin_disabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

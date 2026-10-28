@@ -97,6 +97,8 @@ class ReplyPlugin(Plugin):
     id, priority = "reply", 100
 
     def on_event(self, event: dict) -> HookResult:
+        if (event.get("dialogue") or {}).get("route_plugin") == self.id:
+            return HookResult([{"type": "routine.reply", "mode": "continuation_candidate"}], True)
         if event.get("post_type") == "message" and event.get("at_me"):
             return HookResult([{"type": "routine.reply", "mode": "at"}], True)
         return HookResult()
@@ -106,6 +108,8 @@ class NaturalReplyPlugin(Plugin):
     id, priority = "natural_reply", 110
 
     def on_event(self, event: dict) -> HookResult:
+        if (event.get("dialogue") or {}).get("route_plugin") == self.id:
+            return HookResult([{"type": "routine.reply", "mode": "continuation_candidate"}], True)
         if event.get("post_type") == "message" and not event.get("at_me"):
             return HookResult([{"type": "routine.reply", "mode": "natural"}], True)
         return HookResult()
@@ -198,7 +202,7 @@ class PluginRegistry:
             return {"handled": True, "actions": [], "errors": ["group_disabled"]}
         text = str(event.get("text") or event.get("raw_message") or "").strip()
         reserved = {"/记忆": "command", "/知识": "kb", "/表情": "sticker"}
-        route = reserved.get(text.split(maxsplit=1)[0] if text else "")
+        route = reserved.get(text.split(maxsplit=1)[0] if text else "") or (event.get("dialogue") or {}).get("route_plugin")
         if route and not G.plugin_enabled(goid, route):
             return {"handled": True, "actions": [], "errors": ["plugin_disabled"]}
         errors = []

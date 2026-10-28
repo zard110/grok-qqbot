@@ -63,6 +63,8 @@ class DeliveryStore:
             """)
             if "request_hash" not in {row[1] for row in db.execute("PRAGMA table_info(outbox)")}:
                 db.execute("ALTER TABLE outbox ADD COLUMN request_hash TEXT")
+            from .conversation import initialize
+            initialize(db)
         for suffix in ("", "-wal", "-shm"):
             ensure_shared_perms(Path(str(self.path) + suffix))
 
@@ -106,7 +108,8 @@ class DeliveryStore:
             db.execute("UPDATE inbox SET status=?,error=?,updated=? WHERE id=?", (status, error, time.time(), identity))
 
     def reserve_action(self, identity: str, scope: str, request_hash: str | None = None, *, force: bool = False,
-                       reply_meta: dict | None = None, limits: dict | None = None, cooldown_active: bool = False) -> tuple[bool, dict]:
+                       reply_meta: dict | None = None, limits: dict | None = None, cooldown_active: bool = False,
+                       conversation_turn: dict | None = None) -> tuple[bool, dict]:
         now = time.time()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -122,6 +125,12 @@ class DeliveryStore:
                     raise ReplySuppressed(reason)
             if cooldown_active and not force:
                 raise ReplySuppressed("Group cooldown active")
+            if conversation_turn is not None:
+                from .conversation import reserve
+                try:
+                    reserve(db, scope, identity, conversation_turn, now)
+                except ValueError as error:
+                    raise ReplySuppressed(str(error)) from error
             added = db.execute("INSERT OR IGNORE INTO outbox(id,scope,status,created,updated,request_hash) VALUES(?,?,'pending',?,?,?)", (identity, scope, now, now, request_hash)).rowcount == 1
             row = dict(db.execute("SELECT * FROM outbox WHERE id=?", (identity,)).fetchone())
             if reply_meta is not None:
@@ -154,7 +163,9 @@ class DeliveryStore:
         if status not in {"pending", "inflight", "sent", "failed", "unknown", "partial"}:
             raise ValueError("Invalid outbound outcome")
         with self.connect() as db:
+            from .conversation import finish
             db.execute("UPDATE outbox SET status=?,detail=?,updated=? WHERE id=?", (status, json.dumps(detail or {}, ensure_ascii=False), time.time(), identity))
+            finish(db, identity, status, time.time())
 
     def recent_actions(self, scope: str, window: float = 120):
         with self.connect() as db:

@@ -59,6 +59,7 @@
 # --- reviewed public sticker pack and reply guidance ---
 !/official-bot/install_sticker_pack.py
 !/official-bot/REPLY_STYLE.md
+!/official-bot/CONVERSATION.md
 !/official-bot/assets/openmoji-reactions/*.png
 !/official-bot/assets/openmoji-reactions/manifest.json
 !/official-bot/assets/openmoji-reactions/LICENSE.txt

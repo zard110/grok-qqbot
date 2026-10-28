@@ -422,6 +422,7 @@ def to_payload(outer: dict, bot_openid: str, our_group: str) -> dict | None:
         "text_only": ex["text"],
         "attachments": ex["attachments"],
         "quoted": ex["quoted"],
+        "reply_to": (ex["quoted"] or {}).get("ref_idx", ""),
         "card": ex["card"],
         "ref_idx": ex["ref_idx"],
         "content_type": ex["content_type"],
@@ -508,6 +509,7 @@ def interaction_payload(outer: dict, our_group: str) -> dict | None:
     p = _base(outer, goid, cfg)
     p.update({
         "post_type": "interaction",
+        "event_id": d.get("id") or outer.get("id") or "",
         "interaction_type": d.get("type"),
         "scene": d.get("scene") or "",
         "member_openid": mo,
@@ -541,6 +543,7 @@ def c2c_payload(outer: dict) -> dict:
         "message": [{"type": "text", "data": {"text": ex["raw_message"]}}],
         "attachments": ex["attachments"],
         "quoted": ex["quoted"],
+        "reply_to": (ex["quoted"] or {}).get("ref_idx", ""),
         "card": ex["card"],
         "ref_idx": ex["ref_idx"],
         "sender": {"nickname": author.get("username") or "", "user_id": member_user_id(uo)},
@@ -558,6 +561,12 @@ def should_forward(p: dict) -> tuple[bool, str]:
         return False, "group disabled"
     f = p.get("features") or {}
     pt = p.get("post_type")
+    route = (p.get("dialogue") or {}).get("route_plugin")
+    if route and pt in {"message", "interaction"}:
+        if pt == "interaction" and not f.get("buttons", False):
+            return False, "buttons off"
+        feature = "at_reply" if route == "reply" else "natural_reply"
+        return bool(f.get(feature, feature == "at_reply")), feature + " continuation policy"
     if pt == "message":
         if p.get("at_me"):
             ok = bool(f.get("at_reply", True))
@@ -578,14 +587,31 @@ def should_forward(p: dict) -> tuple[bool, str]:
 
 def forward(payload: dict) -> str:
     from core.memory import MemoryStore
+    from core import conversation
+    from core.reply_policy import event_context, settings, topic_tokens
     memory = MemoryStore(DIR)
     scope = payload.get("group_openid") or "c2c:" + str(payload.get("user_openid") or payload.get("member_openid") or "system")
+    delivery = DeliveryStore(DIR / "runtime.sqlite3")
+    if payload.get("post_type") in {"message", "interaction"}:
+        payload["reply_context"] = event_context(payload)
+        target = "/v2/groups/" + scope if payload.get("group_openid") else "/v2/users/" + scope[4:]
+        payload["dialogue"] = conversation.record_input(delivery, target, payload, payload["reply_context"])
+        if not payload["dialogue"]["valid"]:
+            log("ignored expired or foreign clarification choice")
+            return "skipped"
     text = payload.get("text_only") or payload.get("raw_message") or ""
-    if payload.get("post_type") == "message" and text:
-        memory.add_message(scope, "in:" + str(payload.get("msg_id") or payload.get("delivery_id")), text)
+    if payload.get("post_type") in {"message", "interaction"} and text:
+        memory.add_message(scope, "in:" + str(payload.get("msg_id") or payload.get("event_id") or payload.get("delivery_id")), text,
+                           actor=payload.get("member_openid") or payload.get("user_openid") or "",
+                           nickname=(payload.get("sender") or {}).get("nickname", ""), reply_to=payload.get("reply_to", ""))
     payload["text"] = text
     payload["context"] = memory.context(scope)
-    if payload.get("group_openid") and payload.get("post_type") in {"message", "schedule"}:
+    if "dialogue" in payload:
+        # Existing routines already read context; expose the shared policy here
+        # without rewriting private group personas or duplicating task history.
+        payload["context"]["reply_guidance"] = "先读取 payload.dialogue.pending（同一用户的候选待续问题）。" + conversation.POLICY
+    if payload.get("group_openid") and (payload.get("post_type") in {"message", "schedule"}
+            or (payload.get("dialogue") or {}).get("route_plugin")):
         from core.plugins import dispatch
         from core.action_runner import run_actions
         decision = dispatch(payload)
@@ -613,13 +639,11 @@ def forward(payload: dict) -> str:
     if not ok and not local_command:
         log(f"gated {payload.get('post_type')} group={payload.get('group_name') or payload.get('group_openid','')[:8]}: {why}")
         return "skipped"
-    from core.reply_policy import event_context, settings, topic_tokens
     if payload.get("post_type") == "message":
-        payload["reply_context"] = event_context(payload)
         context = payload["reply_context"]
-        if payload.get("group_openid") and context["trigger"] == "natural":
+        if payload.get("group_openid") and context["trigger"] == "natural" and not payload["dialogue"]["pending"]:
             limits = settings(G.load_config(payload["group_openid"]))
-            if not DeliveryStore().admit_natural(scope, context["topic_key"],
+            if not delivery.admit_natural(scope, context["topic_key"],
                     topic_tokens(context["topic_text"]), limits["inbound_debounce"]):
                 log("natural burst debounced; message retained in context")
                 return "skipped"

@@ -27,7 +27,7 @@ from core.files import file_lock, append_jsonl, confined_path, tail_jsonl
 from core.qq_client import client as qq_client, QQTransportError, classify_status
 from core.media import read_local, image_info, validate_url, safe_open
 from core.delivery import DeliveryStore, ReplySuppressed, stable_id
-from core import message_format, reply_policy
+from core import message_format, reply_policy, conversation
 DIR = DATA_DIR
 import groups as G  # noqa: E402
 API = "https://api.sgroup.qq.com"
@@ -224,6 +224,8 @@ def main() -> None:
     ap.add_argument("--topic-text", default="", help="incoming topic, not the generated reply")
     ap.add_argument("--topic-key", default="", help="stable topic id when supplied by the bridge")
     ap.add_argument("--sticker", action="store_true", help="enforce sticker pacing and a short natural delay")
+    ap.add_argument("--decision", help="model reply decision JSON or @path; answer/clarify/ignore; requires a recorded source")
+    ap.add_argument("--choice-buttons", action="store_true", help="render clarification choices as buttons when group capabilities are verified")
     args = ap.parse_args()
 
     goid = None if args.user_openid else G.resolve(args.group or args.group_openid)
@@ -238,6 +240,25 @@ def main() -> None:
         tok = get_token()
         print(json.dumps({"ok": True, "group_openid": goid, "token_available": bool(tok)}, ensure_ascii=False, indent=2))
         return
+    decision, conversation_turn = None, None
+    if args.decision:
+        if any(getattr(args, key) is not None for key in ("text", "markdown", "keyboard", "image", "voice", "video", "file", "recall")) or args.upload_only or args.sticker:
+            ap.error("--decision cannot be combined with message/media/recall options")
+        value = args.decision
+        if value.startswith("@"):
+            with Path(value[1:]).open("rb") as stream:
+                value = stream.read(32769).decode("utf-8-sig")
+        if len(value.encode("utf-8")) > 32768:
+            ap.error("decision exceeds 32 KiB")
+        decision = conversation.parse_decision(json.loads(value))
+        if decision["action"] == "ignore":
+            print(json.dumps({"ok": True, "skipped": True, "reason": "model_chose_silence"}))
+            return
+        if bool(args.msg_id) == bool(args.event_id):
+            ap.error("--decision requires exactly one of --msg-id or --event-id")
+        args.text = conversation.render(decision)
+    elif args.choice_buttons:
+        ap.error("--choice-buttons requires --decision")
     inferred_context = None
     if goid and args.msg_id and args.trigger is None and not args.topic_text and not args.recall:
         from core.reply_context import recover
@@ -257,10 +278,25 @@ def main() -> None:
         if args.feature and cfg is not None and not (cfg.get("features") or {}).get(args.feature):
             print(json.dumps({"skipped": True, "reason": f"feature {args.feature!r} is off for group {cfg.get('name')}"}, ensure_ascii=False))
             sys.exit(4)
-        if policy_plugin:
-            G.authorize(goid, policy_plugin, "message.send")
     base = target_path(goid, args.user_openid)
     scope = "c2c" if args.user_openid else "group"
+    if decision:
+        conversation_turn = conversation.prepare(DeliveryStore(), base,
+            args.msg_id or args.event_id or args.source_event_id or "", decision)
+        policy_plugin = conversation_turn["plugin_id"]
+        args.source_event_id = conversation_turn["source"]
+        context = conversation_turn["context"]
+        args.trigger = context.get("trigger") if context.get("trigger") in {"at", "command"} else (
+            "question" if decision["intent"] == "request" else "natural")
+        if decision["conversation_id"]:
+            args.trigger = "continuation"
+        args.topic_text, args.topic_key = context.get("topic_text", ""), context.get("topic_key", "")
+        if args.choice_buttons and decision["action"] == "clarify" and decision["options"]:
+            if (cfg.get("features") or {}).get("buttons") and message_format.policy(cfg)["markdown_verified"]:
+                args.keyboard = json.dumps(conversation.keyboard(conversation_turn["question_id"], decision["options"]), ensure_ascii=False)
+                args.markdown, args.text, args.format = args.text, None, "markdown"
+    if goid and policy_plugin:
+        G.authorize(goid, policy_plugin, "message.send")
 
     if args.recall:
         if args.dry_run:
@@ -352,6 +388,8 @@ def main() -> None:
         ap.error("keyboard requires a single Markdown part; shorten content or explicitly choose --format markdown")
     if keyboard:
         parts[0]["keyboard"] = keyboard
+    if decision and decision["action"] == "clarify" and len(parts) != 1:
+        ap.error("clarification must fit one message; shorten the preface/question")
     if markdown_image:
         if len(combined_caption) > (args.max_chars or settings["max_chars"]) - 200:
             ap.error("image + mention caption is too long; shorten the caption")
@@ -378,7 +416,12 @@ def main() -> None:
     for kind, source in media:
         media_identity.append([kind, source if source.startswith(("http://", "https://")) else hashlib.sha256(read_local(source)).hexdigest()])
     trigger = args.msg_id or args.source_event_id or args.event_id or (time.time_ns() if args.force else int(time.time() // WINDOW))
-    action_id = stable_id([base, args.action_id]) if args.action_id else stable_id([base, trigger, plan, media_identity, args.reply_to])
+    identity_parts = [base, trigger, plan, media_identity, args.reply_to]
+    request_parts = [plan, media_identity, args.reply_to, args.msg_id, args.event_id]
+    if decision:
+        identity_parts.append(decision)
+        request_parts.append(decision)
+    action_id = stable_id([base, args.action_id]) if args.action_id else stable_id(identity_parts)
     meta = reply_policy.metadata(args.trigger, args.msg_id or args.source_event_id or args.event_id,
         message_format.plain_text(combined_caption), media_identity, topic_text=args.topic_text,
         topic_key=args.topic_key, sticker=args.sticker)
@@ -391,8 +434,8 @@ def main() -> None:
                                and (recent_sends() or store.recent_actions(base)))
         try:
             reserved, previous = store.reserve_action(action_id, base,
-                stable_id([plan, media_identity, args.reply_to, args.msg_id, args.event_id]),
-                force=bool(args.force), reply_meta=meta, limits=limits, cooldown_active=legacy_cooldown)
+                stable_id(request_parts), force=bool(args.force), reply_meta=meta, limits=limits,
+                cooldown_active=legacy_cooldown, conversation_turn=conversation_turn)
         except ReplySuppressed as error:
             print(json.dumps({"skipped": True, "reason": str(error), "action_id": action_id}))
             raise SystemExit(3)
@@ -429,7 +472,7 @@ def main() -> None:
                 result = post_message(base, payload, msg_id=args.msg_id, event_id=args.event_id,
                     reply_to=args.reply_to if index == 0 else None)
                 fallback_cfg = {**(cfg or {}), "message_format": {**message_format.policy(cfg), "max_chars": args.max_chars or settings["max_chars"]}}
-                if message_format.may_fallback(result, payload, fallback_cfg):
+                if message_format.may_fallback(result, payload, fallback_cfg, choice_fallback=bool(decision and args.choice_buttons)):
                     # Only a definite format rejection may take this branch. A
                     # timeout or successful HTTP response is never replayed.
                     rejection = {"http_status": result["http_status"], "body": result["body"]}
@@ -455,7 +498,8 @@ def main() -> None:
                         "content": content, "id": body.get("id") or "", "action_id": action_id,
                         "reply_policy": meta, "ref_idx": (body.get("ext_info") or {}).get("ref_idx") or "", "keyboard": bool(payload.get("keyboard"))})
                     from core.memory import MemoryStore
-                    MemoryStore(DIR).add_message(goid or "c2c:" + args.user_openid, "out:" + str(body.get("id") or action_id + ":" + str(index)), content, direction="out")
+                    MemoryStore(DIR).add_message(goid or "c2c:" + args.user_openid, "out:" + str(body.get("id") or action_id + ":" + str(index)), content, direction="out",
+                                                actor="bot", reply_to=args.msg_id or args.event_id or "")
                 except Exception:
                     result["warning"] = "Confirmed send; local history update failed"
         except Exception as error:

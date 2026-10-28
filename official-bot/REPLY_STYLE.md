@@ -25,7 +25,7 @@
 
 ## 可直接放进云端例程的约束
 
-> 先读取本群 config/prompt 与 payload.context。先给结论，普通问答 1–3 句；步骤用编号列表；比较默认用“方案—优点—限制”逐项列出。事实、建议、未知项分清，避免堆装饰标题。默认 `--text ... --format auto`，不自行打开 Markdown 验证开关。
+> 先读取本群 config/prompt、payload.context、context.reply_guidance 与 payload.dialogue。信息足够先给结论，普通问答 1–3 句；缺少会改变结论的关键条件才问一个问题，能合理假设就说明假设并先回答，不重复问上下文已有条件。普通对话按 [澄清与衔接协议](CONVERSATION.md) 使用 --decision；语义判断由模型完成，非关键词规则。步骤用编号列表；比较默认用“方案—优点—限制”逐项列出。事实、建议、未知项分清，不自行打开 Markdown 验证开关。
 >
 > 使用 payload.reply_context 的 source_event_id、action_id、trigger、topic_text、topic_key。一次事件最多调用一次发送命令，图和说明合成同一调用，由发送器处理分段；重投沿用同一 action_id。不要用当前时间、随机数或模型输出充当 source_event_id；不要为通过冷却改 source/action/topic。
 >
@@ -56,6 +56,10 @@ python3 send_group.py --group "<group_alias>" --image "<推荐结果.path>" --st
 调用进程应使用参数数组，勿把用户文本拼进 shell。Shell 示例中的多行文本应传真实换行，不依赖 shell 展开 `\n`。
 
 ## 去重所有权与阈值
+
+待续对话的例外见 [CONVERSATION.md](CONVERSATION.md)：当前用户存在有效问题时，先将候选任务交给模型，不做 12 秒自然消息拦截；只有 --decision 明确选中且发送器验证通过的任务续答绕过普通话题冷却。同来源去重、插件权限和配额仍保留。模型用 intent=request/casual 表达语义判断，旧 CLI 继续使用关键词提示兼容。
+
+只有 --decision --choice-buttons 自动生成的澄清按钮，因正文已经包含完整编号选项，支持在明确不支持格式时一次性退为纯文本；其他自定义键盘不改变既有规则。
 
 1. 网关 inbox 以群/事件稳定身份持久去重，Webhook 重投不重复派发。所有入站消息仍写入有界上下文来源。
 2. 自然消息使用每群 12 秒前沿防抖，只抑制相同/高重合词组的话题突发；@、命令、明确问句绕过。它不等待收集尾部消息，也不重放已转发请求。

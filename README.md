@@ -211,12 +211,13 @@ tail -n 20 /workspace/qq-bot-persist/official-bot/official-ws-bridge.log
 - **触发方式**：Webhook 触发（将 URL 和 Key 填入上文 `forwarder-url` 和 `forwarder-key`）。
 - **核心职责与提示词要点**：
   1. **看门狗告警优先分支**：如果收到的 Webhook JSON 中 `post_type == "watchdog_alert"`，说明本地守护进程 `local-watchdog.py` 连续 15 分钟以上未能修复网关连接。立即执行 `sudo bash /workspace/qq-bot-persist/ensure-bots.sh` 并检查 `official-ws-bridge.log`，向主人汇报故障原因与修复结果（不要往 QQ 群发消息）。
-  2. **读取本群配置与人设**：从 payload 中读取 `group_openid`、`group_dir`、`features`、`msg_id`、`at_me`、`raw_message`；先读 `<group_dir>/prompt.md`（本群专属人设）和 `<group_dir>/notes.md`（本群长期记忆），再查看 `<group_dir>/last-events.jsonl` 最近 25 条群聊上下文。
+   2. **读取本群配置与人设**：从 payload 中读取 `group_openid`、`group_dir`、`features`、`msg_id`、`at_me`、`raw_message`；先读 `<group_dir>/prompt.md`（本群专属人设）和 `<group_dir>/notes.md`（本群长期记忆），再读 `payload.context`、`payload.context.reply_guidance` 与 `payload.dialogue.pending`。待续任务的原需求/已知条件/上次问题优先于普通群聊窗口；有必要再查看 `<group_dir>/last-events.jsonl` 最近 25 条群聊上下文。
   3. **自然介入判断**：
-     - 若 `at_me == true`：必回，直接正面回应群友问题（若带图片 URL 则下载识图，若带语音 ASR 则直接回答）。
-     - 若 `at_me == false`：作为同好群友评估是否值得插话（有明确事实问题、求推荐、能接上高质量群梗时才回；闲聊刷屏或 120 秒内刚发过言则安静退出）。
+      - 若 `at_me == true`：回应群友需求。信息足够直接答，关键条件缺失才澄清；不是无条件猜答案。带图片/语音时先理解内容。
+      - 若存在 `dialogue.pending`：先由模型判断新消息是否在补充该问题，正确衔接自由文字、序号或按钮；不要求再次 @，不套普通闲聊 120 秒冷却。不是同一任务就不强行关联。
+      - 其余非 @ 消息：由模型按语义判断明确请求或普通闲聊，有价值才介入。普通闲聊继续受冷却限制；不把关键词分类当作理解结论。
   4. **新表情包自动入库**：若 `raw_message` 含 `[表情包(未入库): .../stickers/xxx.gif | url=...]`，下载查看图片内容后调用 `make_sticker.py --add-sticker` 归档入库。
-  5. **去重与发送**：透传 `reply_context` 的 source/action/trigger/topic 字段，一事件一次 CLI 调用，重投不加 `--force`；按 [回复约定](official-bot/REPLY_STYLE.md) 设置格式和表情节奏。**发送回复**：优先带上 `--msg-id "<msg_id>"` 走被动回复通道，支持文字、Markdown 或斗图工坊生成的表情包。
+   5. **去重与发送**：普通对话按 [澄清与衔接协议](official-bot/CONVERSATION.md) 输出模型 decision，调用 `send_group.py --decision @文件 --msg-id "<msg_id>"`；按钮回调用 `--event-id`。选择继续旧问题时填写其 ID，发送器原子验证归属并防双回。旧文字/媒体 CLI 保持兼容，透传 `reply_context` 的身份与话题字段；一事件一次调用，重投不加 `--force`。按 [回复约定](official-bot/REPLY_STYLE.md) 设置格式和表情节奏。
 
 ### 2. 每小时定时例程：`QQ机器人看门狗`（容器重置零干预兜底）
 

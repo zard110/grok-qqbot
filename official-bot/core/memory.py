@@ -89,6 +89,15 @@ class MemoryStore:
                 line INTEGER NOT NULL,text TEXT NOT NULL);
               CREATE INDEX IF NOT EXISTS chunks_scope ON chunks(scope,document_id);
             """)
+            # Serialize additive migration across gateway/CLI processes. Old rows
+            # have unknown authors; never invent their identity during migration.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+            for name in ("actor", "nickname", "reply_to"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            db.execute("INSERT OR REPLACE INTO memory_meta VALUES('schema_version','2')")
+            db.commit()
             if use_fts:
                 try:
                     db.execute("BEGIN IMMEDIATE")
@@ -121,13 +130,14 @@ class MemoryStore:
         finally:
             db.close()
 
-    def add_message(self, scope, event_key, text, direction="in", timestamp=None):
+    def add_message(self, scope, event_key, text, direction="in", timestamp=None, *, actor="", nickname="", reply_to=""):
         scope = _scope(scope)
         if direction not in ("in", "out"):
             raise ValueError("Invalid direction")
         with self.connection() as db:
-            db.execute("INSERT OR IGNORE INTO messages(scope,event_key,direction,text,timestamp) VALUES(?,?,?,?,?)",
-                       (scope, _text(event_key, 300), direction, _text(text, 100000), timestamp or time.time()))
+            db.execute("INSERT OR IGNORE INTO messages(scope,event_key,direction,text,timestamp,actor,nickname,reply_to) VALUES(?,?,?,?,?,?,?,?)",
+                       (scope, _text(event_key, 300), direction, _text(text, 100000), timestamp or time.time(),
+                        str(actor)[:160], str(nickname)[:100], str(reply_to)[:300]))
             return db.execute("SELECT seq FROM messages WHERE scope=? AND event_key=?", (scope, event_key)).fetchone()[0]
 
     def messages(self, scope, limit=50, after_seq=0):
@@ -432,7 +442,9 @@ class MemoryStore:
             for msg in messages:
                 if msg["direction"] not in ("in", "out"):
                     raise ValueError("Invalid snapshot direction")
-                db.execute("INSERT OR IGNORE INTO messages(scope,event_key,direction,text,timestamp) VALUES(?,?,?,?,?)", (scope, _text(msg["event_key"], 300), msg["direction"], _text(msg["text"], 100000), float(msg["timestamp"])))
+                db.execute("INSERT OR IGNORE INTO messages(scope,event_key,direction,text,timestamp,actor,nickname,reply_to) VALUES(?,?,?,?,?,?,?,?)",
+                           (scope, _text(msg["event_key"], 300), msg["direction"], _text(msg["text"], 100000), float(msg["timestamp"]),
+                            str(msg.get("actor", ""))[:160], str(msg.get("nickname", ""))[:100], str(msg.get("reply_to", ""))[:300]))
                 mapping[msg["seq"]] = db.execute("SELECT seq FROM messages WHERE scope=? AND event_key=?", (scope, msg["event_key"])).fetchone()[0]
             for fact in facts:
                 identifier = _text(fact["id"], 100)

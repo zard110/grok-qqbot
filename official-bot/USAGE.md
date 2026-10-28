@@ -10,6 +10,8 @@
 
 新格式、去重、斗图策略和可复制例程约束见 [REPLY_STYLE.md](REPLY_STYLE.md)。
 
+普通对话新增 `--decision @独立JSON文件`：模型按语义决定 answer/clarify/ignore，并用 intent=request/casual 表达明确请求或闲聊。真实来源使用本轮 --msg-id 或 --event-id；选中有效待续问题才绕过普通话题冷却。默认编号文字；可选 --choice-buttons 在群已验证能力时显示按钮。完整字段、云端例程约定、上下文衔接及部署见 [CONVERSATION.md](CONVERSATION.md)。旧 --text 等入口不变，也不会仅因为文本含问号就建立追问状态。
+
 新增参数：`--format auto|plain|markdown`、`--max-chars`、`--max-parts`、`--source-event-id`、`--trigger legacy|natural|at|question|command`、`--topic-text`、`--topic-key`、`--sticker`。默认 --text 仍为纯文本，但自动清洗表格、围栏、标题/加粗；--format auto 才按群验证能力升级类型。长消息有界分段、超限报错，不截断。
 
 ## 一、发送选项

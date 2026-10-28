@@ -59,7 +59,7 @@ def event_context(event: dict) -> dict:
 
 
 def metadata(trigger, source, text, media, *, topic_text="", topic_key="", sticker=False):
-    if trigger not in {"legacy", "natural", "at", "question", "command"}:
+    if trigger not in {"legacy", "natural", "at", "question", "command", "continuation"}:
         raise ValueError("Unknown reply trigger")
     tokens = topic_tokens(topic_text)
     return {"trigger": trigger, "source": source or "", "content_hash": digest([normalized(text), media]),

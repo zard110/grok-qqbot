@@ -112,11 +112,11 @@ def prepare(content: str, requested: str, config=None, *, mode=None, max_chars=N
             else {"msg_type": 0, "content": chunk} for chunk in chunks], warnings
 
 
-def may_fallback(result: dict, payload: dict, config=None) -> bool:
+def may_fallback(result: dict, payload: dict, config=None, *, choice_fallback=False) -> bool:
     settings = policy(config)
     content = payload.get("markdown", {}).get("content", "")
     if (not settings["fallback_on_reject"] or payload.get("msg_type") != 2
-            or payload.get("keyboard") or "![" in content or "<qqbot-cmd" in content
+            or (payload.get("keyboard") and not choice_fallback) or "![" in content or "<qqbot-cmd" in content
             or len(plain_text(content)) > settings["max_chars"]
             or result.get("http_status") not in (400, 422)):
         return False
@@ -126,5 +126,5 @@ def may_fallback(result: dict, payload: dict, config=None) -> bool:
     if body.get("code") in settings["markdown_reject_codes"]:
         return True
     message = str(body.get("message", body.get("msg", ""))).lower()
-    return "markdown" in message and any(reason in message for reason in
+    return ("markdown" in message or (choice_fallback and "keyboard" in message)) and any(reason in message for reason in
         ("not supported", "unsupported", "not enabled", "未开通", "不支持"))

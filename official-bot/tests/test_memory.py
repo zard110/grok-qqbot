@@ -59,12 +59,15 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(self.store.messages(goid)),3)
         self.assertEqual(len(self.store.messages(goid)),3)
     def test_export_restore(self):
+        self.store.add_message('a','message','补充信息',actor='alice',nickname='小明',reply_to='previous')
         self.store.save_memory('a','subject','fact','value')
         self.store.index_document('a','guide.txt','knowledge')
         snapshot=self.store.export_scope('a')
         other=MemoryStore(self.root/'other');other.restore_scope('a',snapshot)
         self.assertTrue(other.search_memories('a','value'))
         self.assertTrue(other.search_documents('a','knowledge'))
+        self.assertEqual(other.messages('a')[0]['actor'],'alice')
+        self.assertEqual(other.messages('a')[0]['reply_to'],'previous')
         with self.assertRaises(ValueError):other.restore_scope('b',snapshot)
 
     def test_command_receipt_replays_atomically(self):
@@ -92,5 +95,17 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(other.search_memories('a')),1)
         summary=other.summaries('a')[0]
         self.assertEqual(summary['from_seq'],other.messages('a')[0]['seq'])
+
+    def test_old_message_schema_is_migrated_without_inventing_author(self):
+        import sqlite3
+        folder=self.root/'legacy-db';folder.mkdir()
+        with sqlite3.connect(folder/'memory.sqlite3') as db:
+            db.execute('CREATE TABLE messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT NOT NULL,event_key TEXT NOT NULL,direction TEXT NOT NULL,text TEXT NOT NULL,timestamp REAL NOT NULL,UNIQUE(scope,event_key))')
+            db.execute("INSERT INTO messages(scope,event_key,direction,text,timestamp) VALUES('a','old','in','旧消息',1)")
+        db.close()
+        migrated=MemoryStore(folder)
+        self.assertEqual(migrated.messages('a')[0]['actor'],'')
+        migrated.add_message('a','new','新消息',actor='alice',reply_to='old')
+        self.assertEqual(MemoryStore(folder).messages('a')[1]['reply_to'],'old')
 
 if __name__=='__main__':unittest.main()
