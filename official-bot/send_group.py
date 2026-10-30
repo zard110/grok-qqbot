@@ -356,34 +356,25 @@ def main() -> None:
     plan: list[dict] = []
     import re as _re
 
-    def _norm_at_for_text(s: str) -> str:
-        # msg_type=0 (plain text) and msg_type=7 use <@openid> for real @ mentions
-        return _re.sub(
-            r'<qqbot-at-user\s+id=["\']?([0-9A-Fa-f]{16,})["\']?\s*/?>',
-            r"<@\1>",
-            s,
-        )
-
     def _norm_at_for_md(s: str) -> str:
-        # msg_type=2 (markdown) uses <qqbot-at-user id="openid" /> for real @ mentions
-        return _re.sub(r"<@([0-9A-Fa-f]{16,})>", r'<qqbot-at-user id="\1" />', s)
+        # QQ group chat only renders a real @ inside msg_type=2 Markdown, as
+        # <qqbot-at-user id="member_openid" />; <@id> in msg_type=0/7 shows literally.
+        return message_format.markdown_mentions(s)
 
     # If sending a local image + caption that contains an @ mention (<qqbot-at-user or <@HEX>),
     # msg_type=7 does NOT parse @ tags in group chat! Automatically upload via /v2/media-images
     # and send as a single msg_type=2 markdown message with qqbot-media:// + <qqbot-at-user>.
     combined_caption = args.text if args.text is not None else (args.markdown or "")
-    has_at_tag = bool(_re.search(r"<qqbot-at-user|<@[0-9A-Fa-f]{16,}>", combined_caption))
+    has_at_tag = message_format.has_mention(combined_caption)
     markdown_image = bool(media and media[0][0] == "image" and has_at_tag and not media[0][1].startswith(("https://", "http://")))
     settings = message_format.policy(cfg)
     if args.sticker and (not media or media[0][0] != "image"):
         ap.error("--sticker requires --image")
     parts, format_warnings = message_format.prepare(combined_caption, "markdown" if args.markdown is not None else "plain",
         cfg, mode=args.format, max_chars=args.max_chars, max_parts=args.max_parts)
-    for part in parts:
-        if part["msg_type"] == 2:
-            part["markdown"]["content"] = _norm_at_for_md(part["markdown"]["content"])
-        else:
-            part["content"] = _norm_at_for_text(part["content"])
+    if any(part["msg_type"] == 0 and message_format.has_mention(part["content"]) for part in parts):
+        format_warnings.append("Text contains an @ mention; sent as Markdown so QQ renders a real @")
+    parts = message_format.promote_mentions(parts)
     if keyboard and (len(parts) != 1 or parts[0]["msg_type"] != 2):
         ap.error("keyboard requires a single Markdown part; shorten content or explicitly choose --format markdown")
     if keyboard:
@@ -477,7 +468,7 @@ def main() -> None:
                     # Only a definite format rejection may take this branch. A
                     # timeout or successful HTTP response is never replayed.
                     rejection = {"http_status": result["http_status"], "body": result["body"]}
-                    payload = {"msg_type": 0, "content": _norm_at_for_text(message_format.plain_text(payload["markdown"]["content"]))}
+                    payload = {"msg_type": 0, "content": message_format.plain_text(payload["markdown"]["content"])}
                     if args.msg_id or args.event_id:
                         payload["msg_seq"] = (args.msg_seq if args.msg_seq is not None else int(action_id[:8], 16) % 1_000_000) + index
                     result = post_message(base, payload, msg_id=args.msg_id, event_id=args.event_id,

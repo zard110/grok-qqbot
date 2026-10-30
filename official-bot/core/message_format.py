@@ -8,6 +8,10 @@ DEFAULTS = {"markdown_verified": False, "tables_verified": False,
             "fallback_on_reject": True, "markdown_reject_codes": []}
 TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*\|[\s|:\-]*$")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})([\w+-]*)\s*$")
+# QQ group chat renders a real @ only inside Markdown (msg_type=2) as
+# <qqbot-at-user id="member_openid" />. The legacy <@id> form is accepted on
+# input but shows up as literal text in group msg_type=0/7 messages.
+MENTION = re.compile(r"<qqbot-at-user\s+id=[\"']?([0-9A-Fa-f]{16,})[\"']?\s*/?>|<@!?([0-9A-Fa-f]{16,})>")
 DECORATION = re.compile(r"^\s{0,3}#{1,6}\s+|\*\*[^*\n]+\*\*|(?<!\w)__[^_\n]+__(?!\w)", re.MULTILINE)
 
 
@@ -112,11 +116,34 @@ def prepare(content: str, requested: str, config=None, *, mode=None, max_chars=N
             else {"msg_type": 0, "content": chunk} for chunk in chunks], warnings
 
 
+def has_mention(content: str) -> bool:
+    return bool(MENTION.search(content or ""))
+
+
+def markdown_mentions(content: str) -> str:
+    """Normalize every mention form to the Markdown tag QQ renders as a real @."""
+    return MENTION.sub(lambda m: f'<qqbot-at-user id="{m[1] or m[2]}" />', content or "")
+
+
+def promote_mentions(parts: list[dict]) -> list[dict]:
+    """Send any text part that mentions someone as Markdown so the @ is real."""
+    promoted = []
+    for part in parts:
+        if part.get("msg_type") == 0 and has_mention(part.get("content", "")):
+            part = {**{key: value for key, value in part.items() if key != "content"},
+                    "msg_type": 2, "markdown": {"content": markdown_mentions(part["content"])}}
+        elif part.get("msg_type") == 2:
+            part = {**part, "markdown": {**part["markdown"], "content": markdown_mentions(part["markdown"].get("content", ""))}}
+        promoted.append(part)
+    return promoted
+
+
 def may_fallback(result: dict, payload: dict, config=None, *, choice_fallback=False) -> bool:
     settings = policy(config)
     content = payload.get("markdown", {}).get("content", "")
     if (not settings["fallback_on_reject"] or payload.get("msg_type") != 2
             or (payload.get("keyboard") and not choice_fallback) or "![" in content or "<qqbot-cmd" in content
+            or has_mention(content)
             or len(plain_text(content)) > settings["max_chars"]
             or result.get("http_status") not in (400, 422)):
         return False

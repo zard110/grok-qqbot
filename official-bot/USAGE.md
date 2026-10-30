@@ -18,8 +18,8 @@
 
 | 选项 | 作用 |
 |---|---|
-| `--text "..."` | 纯文本（`msg_type=0`，**日常群聊普通文字回复默认推荐**，避免 QQ 客户端偶发静默吞掉 `msg_type=2` Markdown；自动将 `<qqbot-at-user id="..." />` 转为 `<@...>`） |
-| `--markdown "..."` | Markdown（`msg_type=2`，适合挂 `--keyboard` 按钮或单条图文+真实 `@` 混排；自动将 `<@...>` 转为 `<qqbot-at-user id="..." />`） |
+| `--text "..."` | 纯文本（`msg_type=0`，**日常群聊普通文字回复默认推荐**，避免 QQ 客户端偶发静默吞掉 `msg_type=2` Markdown。**例外：文字里含 @（`<qqbot-at-user id="..." />` 或 `<@...>`）时自动改发 `msg_type=2` Markdown**，因为 QQ 群聊只在 Markdown 里渲染真 @，纯文本里的 `<@...>` 会原样显示成字） |
+| `--markdown "..."` | Markdown（`msg_type=2`，适合挂 `--keyboard` 按钮或单条图文+真实 `@` 混排；`<@...>` 会自动转为 `<qqbot-at-user id="..." />`） |
 | `--image PATH或URL` | 发图片（png/jpg；本地文件 ≤5MB，自动 base64 直传；http 链接由平台下载） |
 | `--voice PATH或URL` | 发语音条（mp3/wav/silk；上传失败才自动转 silk） |
 | `--video PATH或URL` | 发视频（mp4，本地 ≤5MB） |
@@ -39,6 +39,7 @@
 图片/媒体加说明文字：
 - **本地图片 + 含 `@` 标签的说明文字**（`--image x.png --text "... <@openid> ..."` 或 `--markdown "... <qqbot-at-user ... />"`）：因 `msg_type=7` 在群聊中不解析真实 `@`，脚本会自动通过 `/v2/media-images` 上传图片获取 `qqbot-media://` 句柄，并合并为**单条** `msg_type=2` Markdown 消息发出（同时带图与真实艾特）。
 - `--image x.png --text "说明"`（不含 `@`）：说明文字和图片在同一条 `msg_type=7` 消息里。
+- 网络图片（http 链接）/语音/视频/文件 + 含 `@` 的说明：先发媒体，说明另起一条 Markdown 发（共 2 条），保证 @ 是真的。
 - `--image x.png --markdown "说明"`（不含 `@`）：先发图，紧接着再发一条 markdown（共 2 条，第二条可以挂 `--keyboard`）。
 
 例子：
@@ -59,7 +60,7 @@ sent-log.jsonl 每次发送记一行：`ts, at, scope(group/c2c), kind(text/mark
 
 ### 免申请的可点指令（markdown 里直接写）
 `<qqbot-cmd-input text="/答 A" show="选A" />`：显示一个可点的标签，点了把 text 填进输入框，用户自己发出去。text/show 最多 100 字，含特殊字符时要 urlencode。群里**不支持** `<qqbot-cmd-enter>`（点了直接发送的那种）。
-@ 人：纯文本 `--text`（`msg_type=0`）底层用 `<@member_openid>`，Markdown `--markdown`（`msg_type=2`）底层用 `<qqbot-at-user id="member_openid" />`；直接传 payload 里的 `at_tag` 即可，`send_group.py` 会按消息类型自动双向转换。
+@ 人：QQ 群聊**只有 Markdown（`msg_type=2`）里的 `<qqbot-at-user id="member_openid" />` 会显示成真 @**（[官方文档·文本交互](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/text-chain.html)：群聊 @用户 仅支持 markdown 消息；`<@userid>` 是即将弃用的旧协议，群里纯文本会原样显示）。直接把 payload 里的 `at_tag` 写进 `--text` 或 `--markdown` 即可；`send_group.py` 发现 @ 会自动把这一段改成 Markdown 发送，并把 `<@id>` 统一换成 `<qqbot-at-user id="id" />`。id 必须是本机器人视角下对方的 `member_openid`（同一个人在不同机器人眼里 openid 不同）。含 @ 的 Markdown 被拒时不会自动降级成纯文本（降级只会得到假 @）。
 
 ### 按钮说明
 - `action.type=2`（指令按钮）：点了插入「@机器人 data」，走普通消息事件。群里 `enter`（自动发送）不生效。

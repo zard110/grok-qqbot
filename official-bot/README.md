@@ -88,13 +88,13 @@ python3 /workspace/qq-bot-persist/official-bot/make_sticker.py \
 更多高级参数（引用回复、语音条、视频、互动按钮、消息撤回）详见 **[USAGE.md](USAGE.md)**。
 
 ```bash
-# 1. 发送纯文本被动回复（日常群聊默认推荐 msg_type=0，防客户端静默吞消息，且自动将 <qqbot-at-user> 转为 <@openid>）
+# 1. 发送纯文本被动回复（日常群聊默认推荐 msg_type=0，防客户端静默吞消息；文字含 @ 时自动改发 msg_type=2 Markdown + <qqbot-at-user>，QQ 群只认这种真 @）
 python3 /workspace/qq-bot-persist/official-bot/send_group.py \
   --text '你好！' --msg-id 'ROBOT1.0_...'
 
 # 2. 发送本地图片 + 真实 @（自动走 /v2/media-images 上传 qqbot-media:// 并合成单条 msg_type=2 消息）
 python3 /workspace/qq-bot-persist/official-bot/send_group.py \
-  --image /tmp/cover.png --text '<@MEMBER_OPENID> 战报来啦！' --msg-id 'ROBOT1.0_...'
+  --image /tmp/cover.png --text '<qqbot-at-user id="MEMBER_OPENID" /> 战报来啦！' --msg-id 'ROBOT1.0_...'
 
 # 3. 发送图片或表情包（支持 jpg / png / gif）
 python3 /workspace/qq-bot-persist/official-bot/send_group.py \

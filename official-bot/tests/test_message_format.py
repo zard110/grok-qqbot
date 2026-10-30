@@ -2,10 +2,25 @@ import unittest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core.message_format import prepare, plain_text, may_fallback, split_content, FENCE
+from core.message_format import prepare, plain_text, may_fallback, split_content, FENCE, promote_mentions, markdown_mentions, has_mention
 
 
 class FormatTests(unittest.TestCase):
+    def test_text_mentions_are_sent_as_markdown_tags(self):
+        a, b = "A" * 16 + "0" * 16, "b" * 16 + "1" * 16
+        text = f"虚心求教 <@{a}> <qqbot-at-user id='{b}'/> 两位前辈\n1. 一"
+        parts = promote_mentions(prepare(text, "plain")[0])
+        self.assertEqual(parts, [{"msg_type": 2, "markdown": {"content":
+            f'虚心求教 <qqbot-at-user id="{a}" /> <qqbot-at-user id="{b}" /> 两位前辈\n1. 一'}}])
+        self.assertNotIn("<@", parts[0]["markdown"]["content"])
+        self.assertEqual(promote_mentions([{"msg_type": 0, "content": "没有艾特 <@all>"}]),
+                         [{"msg_type": 0, "content": "没有艾特 <@all>"}])
+        self.assertEqual(markdown_mentions(f"<@!{a}>"), f'<qqbot-at-user id="{a}" />')
+        self.assertTrue(has_mention(f'<qqbot-at-user id="{a}" />'))
+        payload = {"msg_type": 2, "markdown": {"content": f'<qqbot-at-user id="{a}" /> hi'}}
+        rejected = {"http_status": 400, "body": {"message": "markdown not supported"}}
+        self.assertFalse(may_fallback(rejected, payload))
+
     def test_plain_default_and_auto_capability_gate(self):
         text = "## 结论\n\n- 一\n- 二"
         self.assertEqual(prepare(text, "plain")[0][0]["content"], "结论\n\n- 一\n- 二")
