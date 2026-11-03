@@ -12,6 +12,7 @@ Linux 环境；配置、记忆、后台和离线测试也支持 Windows。
 | `core/files.py` | 原子发布、线程/进程锁、受管目录边界 |
 | `groups.py` | 有效配置、revision、registry、插件绑定与权限 |
 | `core/plugins.py` | 可信内置插件、生命周期、稳定顺序、群级配额与动作路由 |
+| `core/sensenova.py` | `ppt_poster` 插件的商汤日日新海报/PPT 生成（CLI：`sensenova_make.py`） |
 | `core/qq_client.py` | QQ HTTP、凭据和 Token 生命周期 |
 | `core/media.py` | 附件来源校验、限额及安全缓存 |
 | `core/delivery.py` | 入站去重、投递状态、发送动作与分段进度 |
@@ -45,14 +46,14 @@ Webhook 的 `accepted` 仅表示 HTTP 接收成功，不代表外部 Routine 已
 配置缺少新字段时使用兼容默认；损坏、非法或曾登记但缺失的配置关闭业务处理，
 不会恢复为默认启用。后台保存使用 revision；并发编辑返回冲突。
 
-内置插件为 `command`、`kb`、`sticker`、`digest`、`reply`、`natural_reply`。
+内置插件为 `command`、`kb`、`sticker`、`ppt_poster`、`digest`、`reply`、`natural_reply`。
 可配置 `enabled_plugins` 和 `plugin_bindings`，同时保留旧 `features` 门控。
 插件配置包括 `enabled`、`config`、`permissions`、`quota`。群 `quotas` 和插件
 `quota` 可配置 `max_actions_per_day`，UTC 日界切换。配额为本地业务动作额度，
 不替代 QQ 平台限流或模型供应商计费控制。
 
 命令路由示例：`/记忆`、`/记忆 查看`、`/记忆 <内容>`、`/记忆 忘记 <记录ID>`、
-`/知识 <问题>`、`/表情 <关键词>`。修改类动作核对 `admins` 或对应插件能力。
+`/知识 <问题>`、`/表情 <关键词>`、`@机器人 /海报 <需求>`、`@机器人 /PPT <主题> [N页]`。修改类动作核对 `admins` 或对应插件能力。
 `digest` 消费带 `feature` 的 schedule 事件；外部 Cron 负责触发和内容生产，
 此版本没有额外部署自动资讯抓取服务。
 

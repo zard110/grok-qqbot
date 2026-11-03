@@ -42,6 +42,13 @@ def run_actions(event: dict, actions: list[dict]) -> list[dict]:
             value = make_sticker.search_candidates(action["query"], group=scope)
             value["recommendation"] = make_sticker.recommend_sticker(action["query"],
                 context=str(event.get("text_only") or ""), seed=str(event.get("delivery_id") or event.get("msg_id") or ""), group=scope)
+        elif kind in ("media.poster", "media.ppt"):
+            from . import sensenova
+            key = ":".join([scope, str(event.get("msg_id") or event.get("event_id") or event.get("delivery_id") or ""), str(ordinal)])
+            args = {k: action[k] for k in ("prompt", "topic", "slides", "extra", "name") if k in action}
+            value = sensenova.start_job(kind.split(".", 1)[1], args, key)
+        elif kind == "media.usage":
+            value = {"usage": "/海报 <活动/需求描述>" if action.get("kind") == "poster" else "/PPT <主题> [N页]"}
         else:
             raise ValueError("Unknown local action")
         results.append({"type": kind, "ok": True, "result": value})

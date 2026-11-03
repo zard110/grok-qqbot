@@ -23,7 +23,7 @@ report() { echo "secret-scan: $1"; fail=1; }
 # 1) forbidden paths
 for f in "${FILES[@]}"; do
   case "$f" in
-    */appid|*/appsecret|*forwarder-url|*forwarder-key|*/url|*/key|github/*|*password*|*.bak*|*.log|*.jsonl|*.lock|*ref-cache*|*last-forward*|*local-watchdog-state*|*/c2c/*|*/_system/*|*/notes.md|*/knowledge/*|*/media/*|*bot_openid*|*group_openid.txt|*bot_uin*|*box-public-ip*|*onebot11_*|*Napcat*|*.tar.gz|*.env|*.sqlite3*|*.db|*.db-*|*dashboard-session*|*supervisor-*.json|*/groups/registry.json)
+    */appid|*/appsecret|*/sensenova-key|*/tavily-key|*forwarder-url|*forwarder-key|*/url|*/key|github/*|*password*|*.bak*|*.log|*.jsonl|*.lock|*ref-cache*|*last-forward*|*local-watchdog-state*|*/c2c/*|*/_system/*|*/notes.md|*/knowledge/*|*/media/*|*bot_openid*|*group_openid.txt|*bot_uin*|*box-public-ip*|*onebot11_*|*Napcat*|*.tar.gz|*.env|*.sqlite3*|*.db|*.db-*|*dashboard-session*|*supervisor-*.json|*/groups/registry.json)
       report "forbidden path staged: $f" ;;
     official-bot/groups/*/config.json)
       [ "$f" = "official-bot/groups/_default/config.json" ] || report "real group config staged: $f" ;;
@@ -32,7 +32,7 @@ done
 
 # 2) literal values from local secret / identity files (values are never printed)
 LIT=()
-for s in official-bot/appid official-bot/appsecret official-bot/bot_uin.txt official-bot/bot_openid.txt \
+for s in official-bot/appid official-bot/appsecret official-bot/sensenova-key official-bot/tavily-key official-bot/bot_uin.txt official-bot/bot_openid.txt \
          official-bot/group_openid.txt forwarder-url forwarder-key github/password /root/forwarder/url /root/forwarder/key; do
   [ -r "$s" ] && v="$(tr -d '\r\n' < "$s")" && [ "${#v}" -ge 6 ] && LIT+=("$v")
 done
@@ -41,7 +41,7 @@ for c in official-bot/groups/*/config.json; do
   while read -r v; do [ "${#v}" -ge 6 ] && LIT+=("$v"); done < <(grep -oE '[0-9A-F]{32}|\b[0-9]{6,12}\b' "$c" | sort -u)
 done
 
-URL_ALLOW='^[0-9]+:https?://(\.\.\.$|github\.com/$|q\.qq\.com|bot\.q\.qq\.com|api\.sgroup\.qq\.com|api\.bot\.qq\.com|bots\.qq\.com|qq-ai\.cdn-go\.cn|github\.com/(x/y|<owner>|zard110/maxshenbi-qqbot)|github\.com/(tencent-connect/bot-docs|hfg-gmuend/openmoji)(/|$)|raw\.githubusercontent\.com/hfg-gmuend/openmoji/|openmoji\.org(/|$)|creativecommons\.org/licenses/by-sa/4\.0(/|$)|example\.com|www\.qq\.com|qun\.qq\.com|127\.0\.0\.1(:[0-9]*)?(/|$)|localhost(:[0-9]*)?(/|$))'
+URL_ALLOW='^[0-9]+:https?://(\.\.\.$|github\.com/$|q\.qq\.com|bot\.q\.qq\.com|api\.sgroup\.qq\.com|api\.bot\.qq\.com|bots\.qq\.com|qq-ai\.cdn-go\.cn|token\.sensenova\.cn|github\.com/(x/y|<owner>|zard110/maxshenbi-qqbot)|github\.com/(tencent-connect/bot-docs|hfg-gmuend/openmoji)(/|$)|raw\.githubusercontent\.com/hfg-gmuend/openmoji/|openmoji\.org(/|$)|creativecommons\.org/licenses/by-sa/4\.0(/|$)|example\.com|www\.qq\.com|qun\.qq\.com|127\.0\.0\.1(:[0-9]*)?(/|$)|localhost(:[0-9]*)?(/|$))'
 for f in "${FILES[@]}"; do
   # Reviewed PNGs still undergo literal/token checks. Strip binary bytes before
   # Bash command substitution (which otherwise discards NUL with noisy warnings).

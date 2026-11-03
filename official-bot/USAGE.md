@@ -100,3 +100,28 @@ sent-log.jsonl 每次发送记一行：`ts, at, scope(group/c2c), kind(text/mark
 - `user_openid`、`raw_message`、`attachments`、`msg_id`。回复：`send_group.py --user-openid <user_openid> --msg-id <msg_id> --markdown "..."`。
 
 图库与生成图默认不画英文署名页脚，来源/许可保存在索引与侧车。需画面署名时用 `make_sticker.py --embed-credit-footer`；旧素材包执行 `install_sticker_pack.py --group zwift` 可更新为无页脚版本（不删除旧文件或本土图库）。
+
+## 三、做海报 / PPT（`ppt_poster` 插件，商汤日日新 SenseNova）
+
+逻辑在 `core/sensenova.py`，命令行入口 `sensenova_make.py`（本地 `tools/sensenova_make.py` 只是兼容包装）。
+密钥运行时读取 `official-bot/sensenova-key`（600 权限，不进 Git）或环境变量 `SENSENOVA_API_KEY`，从不打印。
+
+```bash
+python3 sensenova_make.py poster --prompt "周六夜骑团骑海报，Watopia 平路 40km" [--ref ref.png] [--no-image] [--name 标题]
+python3 sensenova_make.py ppt --topic "乐扣低代码平台介绍" [--slides 6] [--images 2] [--extra "面向客户"] [--name 标题]
+python3 sensenova_make.py rerender media/generated/<目录> [--name 新标题]   # 不调接口，只重渲染/改名
+```
+
+- 产物按业务标题命名：`<标题>.png`（海报）；`<标题>.pptx`、`<标题>.pdf`、`<标题>-长图.jpg` 和 `slideNN.png`（PPT）。
+  标题优先级：`--name` → 模型给的 FILE_TITLE → 封面主标题 → 主题；deck/PPT/海报 等泛词会被丢弃。
+- stdout 是一个 JSON（`ok`、`title`、`png`/`send_path` 或 `pptx`/`pdf`/`long_image`/`send_paths`、`fit`、`usage`），
+  同时写入 `<目录>/result.json`。退出码：0 成功，2 失败，3 额度/限流（5 小时 12 万、每周 120 万积分），4 鉴权/缺密钥。
+- 渲染用 Playwright + Chrome（`/opt/fetchurl-venv/bin/python`，没有则用当前解释器），字体 Noto Sans CJK SC；
+  文字溢出会自动缩放，文字块重叠（交叠 >25% 较小块）会自动调用一次修复。发群用 `send_group.py --image <send_path>`，
+  每次一张，超过 5MB 自动给 JPEG 副本。
+
+群内命令（需 `features.ppt_poster=true` 且 `enabled_plugins` 含 `ppt_poster`，默认关闭）：
+`@机器人 /海报 <需求>`、`@机器人 /PPT <主题> [N页]`。插件只返回 `media.poster` / `media.ppt` 动作，
+`action_runner` 后台启动任务并在 `plugin_results` 里给出 `dir` 和 `result_file`；例程轮询 `result.json` 后自己发图。
+同一条消息重投不会重复开任务；`plugin_bindings.ppt_poster.quota.max_actions_per_day` 可限制每天次数，
+`config.default_slides` / `config.max_slides` 控制默认页数和上限。插件关闭时 `/海报`、`/PPT` 按普通 @ 消息交给例程。

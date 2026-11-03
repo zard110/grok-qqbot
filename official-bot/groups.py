@@ -17,14 +17,17 @@ C2C_DIR = DIR / "c2c"
 SYSTEM_DIR = DIR / "_system"
 OPENID_RE = re.compile(r"^[0-9A-F]{32}$")
 PLUGIN_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
-BUILTIN_PLUGINS = ("command", "kb", "sticker", "digest", "reply", "natural_reply")
+BUILTIN_PLUGINS = ("command", "kb", "sticker", "ppt_poster", "digest", "reply", "natural_reply")
+# plugin id -> legacy features switch that gates it
+FEATURE_GATES = {"kb": "knowledge", "sticker": "image_gen", "ppt_poster": "ppt_poster",
+                 "reply": "at_reply", "natural_reply": "natural_reply"}
 _LAST_GOOD: dict[str, dict] = {}
 
 FALLBACK_DEFAULT = {
     "name": "", "aliases": [], "group_openid": "", "qq_group_id": None,
     "enabled": True, "revision": 0,
     "features": {"natural_reply": False, "at_reply": True, "daily_ai_news": False,
-                 "x_info_push": False, "image_gen": False, "buttons": False,
+                 "x_info_push": False, "image_gen": False, "ppt_poster": False, "buttons": False,
                  "welcome": False, "media_understanding": True, "knowledge": True},
     "style": "礼貌、简洁，用中文回答；只在被 @ 时回复。",
     "admins": [], "knowledge": {"docs_dir": "knowledge/", "repos": []},
@@ -274,7 +277,7 @@ def plugin_enabled(goid: str, plugin_id: str) -> bool:
     if not cfg["plugin_bindings"].get(plugin_id, {}).get("enabled", True):
         return False
     features = cfg["features"]
-    gates = {"kb": "knowledge", "sticker": "image_gen", "reply": "at_reply", "natural_reply": "natural_reply"}
+    gates = FEATURE_GATES
     if plugin_id == "digest":
         return features.get("daily_ai_news", False) or features.get("x_info_push", False)
     return features.get(gates[plugin_id], False) if plugin_id in gates else True
@@ -295,7 +298,7 @@ def update_plugin_binding(goid: str, plugin_id: str, binding: dict, expected_rev
         if not binding.get("enabled", True) and plugin_id in enabled:
             enabled.remove(plugin_id)
         features = dict(cfg["features"])
-        feature = {"kb": "knowledge", "sticker": "image_gen", "reply": "at_reply", "natural_reply": "natural_reply"}.get(plugin_id)
+        feature = FEATURE_GATES.get(plugin_id)
         if feature and "enabled" in binding:
             features[feature] = binding["enabled"]
         return update_config(goid, expected_revision, plugin_bindings=bindings, enabled_plugins=enabled, features=features)

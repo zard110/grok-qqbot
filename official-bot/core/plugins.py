@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -80,6 +81,31 @@ class StickerPlugin(Plugin):
         if text.startswith("/表情 "):
             return HookResult([{"type": "sticker.search", "query": text[4:].strip()}], True)
         return HookResult()
+
+
+class PptPosterPlugin(Plugin):
+    """`/海报 <需求>` and `/PPT <主题> [N页]` -> SenseNova generation jobs (core/sensenova.py)."""
+    id, priority = "ppt_poster", 35
+    COMMANDS = {"/海报": "poster", "/ppt": "ppt"}
+
+    def on_event(self, event: dict) -> HookResult:
+        text = str(event.get("text") or event.get("raw_message") or "").strip()
+        head, _, rest = text.replace("\u3000", " ").partition(" ")
+        kind = self.COMMANDS.get(head.lower())
+        rest = rest.strip()
+        # Each job spends SenseNova credits, so only explicit @ commands start one.
+        if not kind or not event.get("at_me"):
+            return HookResult()
+        if not rest:
+            return HookResult([{"type": "media.usage", "kind": kind}], True)
+        if kind == "poster":
+            return HookResult([{"type": "media.poster", "prompt": rest[:1000]}], True)
+        limit = int(self.context.plugin_config.get("max_slides", 12))
+        slides = int(self.context.plugin_config.get("default_slides", 6))
+        match = re.search(r"(?:^|\s)(\d{1,2})\s*页\s*$", rest)
+        if match:
+            slides, rest = int(match.group(1)), rest[:match.start()].strip()
+        return HookResult([{"type": "media.ppt", "topic": rest[:500], "slides": max(1, min(slides, limit))}], True)
 
 
 class DigestPlugin(Plugin):
@@ -154,7 +180,7 @@ class PluginRegistry:
         self._instances: dict[tuple[str, str], tuple[str, Plugin]] = {}
         self._lock = threading.RLock()
         if builtins:
-            for plugin in (CommandPlugin, KnowledgePlugin, StickerPlugin, DigestPlugin, ReplyPlugin, NaturalReplyPlugin):
+            for plugin in (CommandPlugin, KnowledgePlugin, StickerPlugin, PptPosterPlugin, DigestPlugin, ReplyPlugin, NaturalReplyPlugin):
                 self.register(plugin)
 
     def register(self, factory: Callable[[], Plugin]) -> None:
@@ -201,6 +227,8 @@ class PluginRegistry:
                         self._instances.pop(key)[1].stop()
             return {"handled": True, "actions": [], "errors": ["group_disabled"]}
         text = str(event.get("text") or event.get("raw_message") or "").strip()
+        # /海报 and /PPT are not reserved: while ppt_poster is off they fall through to the
+        # normal @ reply routine (which may still call sensenova_make.py itself).
         reserved = {"/记忆": "command", "/知识": "kb", "/表情": "sticker"}
         route = reserved.get(text.split(maxsplit=1)[0] if text else "") or (event.get("dialogue") or {}).get("route_plugin")
         if route and not G.plugin_enabled(goid, route):

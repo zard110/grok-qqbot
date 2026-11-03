@@ -5,6 +5,7 @@
     "command",
     "kb",
     "sticker",
+    "ppt_poster",
     "digest",
     "reply",
     "natural_reply"
@@ -19,6 +20,7 @@
     "daily_ai_news": false,
     "x_info_push": false,
     "image_gen": false,
+    "ppt_poster": false,
     "buttons": false,
     "welcome": false,
     "media_understanding": true,
