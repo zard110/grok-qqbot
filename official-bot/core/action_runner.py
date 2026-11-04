@@ -50,6 +50,9 @@ def run_actions(event: dict, actions: list[dict]) -> list[dict]:
         elif kind == "coffee.step":
             from . import luckin
             value = luckin.start_step(scope, event)
+        elif kind == "amap.query":
+            from . import amap
+            value = amap.start_query(scope, event)
         elif kind == "media.usage":
             value = {"usage": "/海报 <活动/需求描述>" if action.get("kind") == "poster" else "/PPT <主题> [N页]"}
         else:

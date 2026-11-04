@@ -631,9 +631,9 @@ def forward(payload: dict) -> str:
         else:
             payload["plugin_results"] = run_actions(payload, decision["actions"])
             payload["local_actions_completed"] = bool(payload["plugin_results"])
-            if decision["actions"] and all(a.get("type") == "coffee.step" for a in decision["actions"]):
-                # luckin_coffee replies by itself (detached worker); the LLM routine must not answer too.
-                log("luckin_coffee step started locally; not forwarded")
+            if decision["actions"] and all(a.get("type") in ("coffee.step", "amap.query") for a in decision["actions"]):
+                # luckin_coffee / amap reply by themselves (detached worker); the LLM routine must not answer too.
+                log(decision["actions"][0]["type"] + " started locally; not forwarded")
                 return "accepted"
             # Explicit commands have already passed their own plugin permission gate.
             local_command = bool(payload["plugin_results"])

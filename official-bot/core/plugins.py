@@ -133,6 +133,38 @@ class LuckinCoffeePlugin(Plugin):
         return HookResult([{"type": "coffee.step", "step": step}], True)
 
 
+class AmapPlugin(Plugin):
+    """AMap (高德) helpers (core/amap.py): 附近找店 / 骑行路线 / 天气骑行建议 / 中点聚餐.
+
+    Slash commands (/附近 /骑行 /天气 /中点 /高德) always route here; natural phrasing needs an @.
+    When luckin_coffee is on in the same group, "@bot 想喝瑞幸"-style order intents stay with it.
+    The query runs detached (``amap.query``) and replies via send_group.py with a static map image.
+    """
+    id, priority = "amap", 24
+
+    def on_event(self, event: dict) -> HookResult:
+        if event.get("post_type") != "message" or event.get("from_bot"):
+            return HookResult()
+        from . import amap
+        member = str(event.get("member_openid") or "")
+        allow = self.context.plugin_config.get("allow_members") or []
+        if not member or (allow and member not in allow):
+            return HookResult()
+        text = str(event.get("text_only") or event.get("text") or event.get("raw_message") or "")
+        req = amap.parse(text, bool(event.get("at_me")))
+        if not req:
+            return HookResult()
+        slash = bool(amap.PREFIX.match(amap.clean(text)))
+        if not slash:
+            if req["kind"] == "weather" and not req.get("city") and not self.context.plugin_config.get("default_city"):
+                return HookResult()  # "今天适合骑车吗" with no city: let the chat routine answer
+            if self.context.config.get("features", {}).get("luckin_coffee"):
+                from . import luckin
+                if luckin.is_order_intent(text):
+                    return HookResult()
+        return HookResult([{"type": "amap.query", "kind": req["kind"]}], True)
+
+
 class DigestPlugin(Plugin):
     id, priority = "digest", 40
 
@@ -205,7 +237,7 @@ class PluginRegistry:
         self._instances: dict[tuple[str, str], tuple[str, Plugin]] = {}
         self._lock = threading.RLock()
         if builtins:
-            for plugin in (CommandPlugin, KnowledgePlugin, StickerPlugin, LuckinCoffeePlugin, PptPosterPlugin, DigestPlugin, ReplyPlugin, NaturalReplyPlugin):
+            for plugin in (CommandPlugin, KnowledgePlugin, StickerPlugin, AmapPlugin, LuckinCoffeePlugin, PptPosterPlugin, DigestPlugin, ReplyPlugin, NaturalReplyPlugin):
                 self.register(plugin)
 
     def register(self, factory: Callable[[], Plugin]) -> None:

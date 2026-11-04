@@ -150,3 +150,31 @@ python3 luckin_coffee.py disable --group zwift
 `max_orders_per_group_per_day`、`session_minutes`、`pay_timeout_minutes`、`max_shops`、`default_queries`）。
 只支持到店自取。地理编码默认 OpenStreetMap Nominatim（地标识别一般，会把识别结果回显给用户）；放一个高德 Web 服务 Key 到
 `official-bot/amap-key`（或环境变量 `AMAP_KEY`）则改用高德 POI 搜索，更准。
+
+## 三·六、高德地图助手（`amap` 插件，高德 Web 服务 REST API）
+
+逻辑在 `core/amap.py`，命令行入口 `amap_tool.py`。Key 读取环境变量 `AMAP_WEB_KEY`（或 `AMAP_KEY`）或
+`official-bot/amap-key`（600 权限，不进 Git，从不打印/写日志/拼进发到群里的链接）。静态地图在服务端下载成 PNG 再发图片，
+群里只会出现不带 key 的 `uri.amap.com` 唤起链接。默认关闭（`features.amap=false`）。
+
+```bash
+python3 amap_tool.py check                          # 用 1 次地理编码校验 key（不打印 key）
+python3 amap_tool.py usage                          # 本月本地调用计数（search / weather / lbs 三个桶）
+python3 amap_tool.py dry-run "南京新街口附近的瑞幸" --out /tmp/x   # 真调用但不发群：写 /tmp/x.md + /tmp/x.png
+python3 amap_tool.py enable --group zwift           # 打开 features.amap 并加入 enabled_plugins
+python3 amap_tool.py disable --group zwift
+```
+
+用法（斜杠命令不用 @；自然语言要 @机器人）：
+- 附近找店：`/附近 南京新街口 瑞幸`、`@机器人 新街口附近的火锅` → 一条 Markdown 表格（编号/店名/距离/地址/评分/人均/「去这」导航链接）+ 带编号的地图。
+- 骑行路线：`/骑行 玄武湖 中山陵`、`@机器人 从玄武湖骑到中山陵` → 距离、高德骑行用时、公路车估算（`road_bike_kmh`）、主要道路 + 路线图 + 导航链接（高德不给爬升）。
+- 天气：`/天气 南京`、`@机器人 南京明天适合骑车吗` → 实况 + 4 天预报，骑行建议明确标注「仅供参考」。没说城市时用 `default_city`，都没有就交给普通聊天。
+- 中点聚餐：`/中点 新街口 仙林 江宁 火锅`（2–6 个地址，末尾可写吃什么）→ 取几何中心搜附近，按「最远那个人开车多久」最小挑最公平的店，表格列出每人开车/公交时间 + 地图（蓝=出发地，红 A=推荐）。
+- `/高德` 显示帮助。群里开了 `luckin_coffee` 时，「@机器人 想喝瑞幸」这类点单意图仍交给瑞幸插件；`/附近` 永远走高德。
+
+配额（高德个人开发者免费额度：搜索 5000/月、天气 5000/月、其余 LBS 15 万/月、3 QPS）：本地计数在
+`media/amap/api-usage.json`，到 95% 就停用并礼貌回复；跨进程限流 3 QPS；结果缓存 10 分钟（天气 30 分钟）；
+每人每天 10 次、每群每天 200 次（`groups/<群>/amap-usage.json`）。`plugin_bindings.amap.config` 可调：
+`default_city`、`allow_members`、`max_results`、`radius`、`max_requests_per_member_per_day`、
+`max_requests_per_group_per_day`、`midpoint_candidates`、`midpoint_transit`、`max_participants`、`embed_image`、`road_bike_kmh`。
+一次中点查询大约 N 次地理编码 + 1–2 次搜索 + 4 次距离矩阵 + N 次公交 + 1 张静态图。

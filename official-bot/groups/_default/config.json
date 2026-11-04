@@ -7,6 +7,7 @@
     "sticker",
     "ppt_poster",
     "luckin_coffee",
+    "amap",
     "digest",
     "reply",
     "natural_reply"
@@ -23,6 +24,7 @@
     "image_gen": false,
     "ppt_poster": false,
     "luckin_coffee": false,
+    "amap": false,
     "buttons": false,
     "welcome": false,
     "media_understanding": true,

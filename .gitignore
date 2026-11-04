@@ -28,6 +28,7 @@
 !/official-bot/make_sticker.py
 !/official-bot/sensenova_make.py
 !/official-bot/luckin_coffee.py
+!/official-bot/amap_tool.py
 !/official-bot/local-watchdog.py
 !/official-bot/run-local-watchdog.sh
 !/official-bot/run-official-ws.sh
@@ -84,3 +85,4 @@ __pycache__/
 /official-bot/*-token
 /official-bot/media/generated/
 /official-bot/tools/
+/official-bot/amap-key
