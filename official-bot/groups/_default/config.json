@@ -6,6 +6,7 @@
     "kb",
     "sticker",
     "ppt_poster",
+    "luckin_coffee",
     "digest",
     "reply",
     "natural_reply"
@@ -21,6 +22,7 @@
     "x_info_push": false,
     "image_gen": false,
     "ppt_poster": false,
+    "luckin_coffee": false,
     "buttons": false,
     "welcome": false,
     "media_understanding": true,

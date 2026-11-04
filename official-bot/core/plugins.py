@@ -108,6 +108,31 @@ class PptPosterPlugin(Plugin):
         return HookResult([{"type": "media.ppt", "topic": rest[:500], "slides": max(1, min(slides, limit))}], True)
 
 
+class LuckinCoffeePlugin(Plugin):
+    """Luckin pickup ordering (core/luckin.py): @bot 想喝咖啡 / /咖啡 -> shops x drinks -> 编号 -> 确认 -> pay -> 取餐码.
+
+    Only claims a message when it starts an order (@ + order intent) or continues the sender's own
+    live session (number / 确认 / 取消 / location); everything else falls through to the routines.
+    The step itself runs detached (``coffee.step``) and replies via send_group.py.
+    """
+    id, priority = "luckin_coffee", 25
+
+    def on_event(self, event: dict) -> HookResult:
+        if event.get("post_type") != "message" or event.get("from_bot"):
+            return HookResult()
+        from . import luckin
+        member = str(event.get("member_openid") or "")
+        allow = self.context.plugin_config.get("allow_members") or []
+        if not member or (allow and member not in allow):
+            return HookResult()
+        text = str(event.get("text_only") or event.get("text") or event.get("raw_message") or "")
+        session = luckin.active_session(luckin.load_state(self.context.group_openid), member)
+        step = luckin.classify(text, bool(event.get("at_me")), session)
+        if not step:
+            return HookResult()
+        return HookResult([{"type": "coffee.step", "step": step}], True)
+
+
 class DigestPlugin(Plugin):
     id, priority = "digest", 40
 
@@ -180,7 +205,7 @@ class PluginRegistry:
         self._instances: dict[tuple[str, str], tuple[str, Plugin]] = {}
         self._lock = threading.RLock()
         if builtins:
-            for plugin in (CommandPlugin, KnowledgePlugin, StickerPlugin, PptPosterPlugin, DigestPlugin, ReplyPlugin, NaturalReplyPlugin):
+            for plugin in (CommandPlugin, KnowledgePlugin, StickerPlugin, LuckinCoffeePlugin, PptPosterPlugin, DigestPlugin, ReplyPlugin, NaturalReplyPlugin):
                 self.register(plugin)
 
     def register(self, factory: Callable[[], Plugin]) -> None:

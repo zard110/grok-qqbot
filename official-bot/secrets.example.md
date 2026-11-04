@@ -9,6 +9,8 @@
 | `official-bot/appid` | QQ 开放平台机器人的 `AppID` | `<APPID>` |
 | `official-bot/appsecret` | QQ 开放平台机器人的 `AppSecret`（机器人密钥） | `<APPSECRET>` |
 | `official-bot/sensenova-key` | （可选）商汤日日新 SenseNova API Key，`ppt_poster` 插件 / `sensenova_make.py` 做海报和 PPT 用 | `<SENSENOVA_API_KEY>` |
+| `official-bot/luckin-token` | （可选）瑞幸官方 MCP 令牌（open.lkcoffee.com/mcp 生成），`luckin_coffee` 插件点单用，订单记在生成令牌的账号上 | `<LUCKIN_MCP_TOKEN>` |
+| `official-bot/amap-key` | （可选）高德 Web 服务 Key，`luckin_coffee` 把地址转经纬度用；没有则用 OpenStreetMap | `<AMAP_KEY>` |
 | `official-bot/bot_uin.txt` | 机器人自身的 QQ 号（用于写入转发 Payload 的 `bot_uin` / `self_id`） | `<BOT_QQ>` |
 | `official-bot/bot_name.txt` | （可选）机器人昵称，未配置时默认为 `MaxShenBi` | `MaxShenBi` |
 | `official-bot/bot_openid.txt` | （可选）机器人在群内的 `member_openid`，网关收到 `@` 消息时也会自动学习记录 | `<32位十六进制OPENID>` |

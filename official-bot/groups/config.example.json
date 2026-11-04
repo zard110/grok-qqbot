@@ -6,10 +6,12 @@
   "group_openid": "<GROUP_OPENID_32_HEX>",
   "qq_group_id": null,
   "enabled": true,
-  "enabled_plugins": ["command", "kb", "sticker", "ppt_poster", "digest", "reply", "natural_reply"],
+  "enabled_plugins": ["command", "kb", "sticker", "ppt_poster", "luckin_coffee", "digest", "reply", "natural_reply"],
   "plugin_bindings": {
     "sticker": {"enabled": true, "config": {}, "quota": {"max_actions_per_day": 50}},
-    "ppt_poster": {"enabled": true, "config": {"default_slides": 6, "max_slides": 12}, "quota": {"max_actions_per_day": 20}}
+    "ppt_poster": {"enabled": true, "config": {"default_slides": 6, "max_slides": 12}, "quota": {"max_actions_per_day": 20}},
+    "luckin_coffee": {"enabled": false, "config": {"allow_members": [], "order_members": [], "max_orders_per_member_per_hour": 2,
+                      "max_orders_per_group_per_day": 20, "session_minutes": 10, "pay_timeout_minutes": 15, "max_shops": 3}}
   },
   "quotas": {"max_actions_per_day": 500},
   "features": {
@@ -19,6 +21,7 @@
     "x_info_push": false,
     "image_gen": true,
     "ppt_poster": true,
+    "luckin_coffee": false,
     "buttons": true,
     "welcome": true,
     "media_understanding": true,

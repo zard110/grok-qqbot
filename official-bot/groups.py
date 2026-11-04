@@ -17,9 +17,9 @@ C2C_DIR = DIR / "c2c"
 SYSTEM_DIR = DIR / "_system"
 OPENID_RE = re.compile(r"^[0-9A-F]{32}$")
 PLUGIN_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
-BUILTIN_PLUGINS = ("command", "kb", "sticker", "ppt_poster", "digest", "reply", "natural_reply")
+BUILTIN_PLUGINS = ("command", "kb", "sticker", "ppt_poster", "luckin_coffee", "digest", "reply", "natural_reply")
 # plugin id -> legacy features switch that gates it
-FEATURE_GATES = {"kb": "knowledge", "sticker": "image_gen", "ppt_poster": "ppt_poster",
+FEATURE_GATES = {"kb": "knowledge", "sticker": "image_gen", "ppt_poster": "ppt_poster", "luckin_coffee": "luckin_coffee",
                  "reply": "at_reply", "natural_reply": "natural_reply"}
 _LAST_GOOD: dict[str, dict] = {}
 
@@ -27,7 +27,8 @@ FALLBACK_DEFAULT = {
     "name": "", "aliases": [], "group_openid": "", "qq_group_id": None,
     "enabled": True, "revision": 0,
     "features": {"natural_reply": False, "at_reply": True, "daily_ai_news": False,
-                 "x_info_push": False, "image_gen": False, "ppt_poster": False, "buttons": False,
+                 "x_info_push": False, "image_gen": False, "ppt_poster": False, "luckin_coffee": False,
+                 "buttons": False,
                  "welcome": False, "media_understanding": True, "knowledge": True},
     "style": "礼貌、简洁，用中文回答；只在被 @ 时回复。",
     "admins": [], "knowledge": {"docs_dir": "knowledge/", "repos": []},

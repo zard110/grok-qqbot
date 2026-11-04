@@ -125,3 +125,28 @@ python3 sensenova_make.py rerender media/generated/<目录> [--name 新标题]  
 `action_runner` 后台启动任务并在 `plugin_results` 里给出 `dir` 和 `result_file`；例程轮询 `result.json` 后自己发图。
 同一条消息重投不会重复开任务；`plugin_bindings.ppt_poster.quota.max_actions_per_day` 可限制每天次数，
 `config.default_slides` / `config.max_slides` 控制默认页数和上限。插件关闭时 `/海报`、`/PPT` 按普通 @ 消息交给例程。
+
+## 三·五、瑞幸自提点单（`luckin_coffee` 插件，瑞幸官方 MCP）
+
+逻辑在 `core/luckin.py`，命令行入口 `luckin_coffee.py`。令牌读取环境变量 `LUCKIN_MCP_TOKEN` 或
+`official-bot/luckin-token`（600 权限，不进 Git，从不打印/写日志）；令牌在 https://open.lkcoffee.com/mcp 用瑞幸账号登录后生成，
+**订单记在这个账号上**。没有令牌或令牌过期时，群里只会礼貌回复“还没开通/授权过期”，不调用任何接口。
+
+```bash
+python3 luckin_coffee.py check                    # 校验令牌，只打印工具名
+python3 luckin_coffee.py enable --group zwift     # 打开 features.luckin_coffee 并加入 enabled_plugins
+python3 luckin_coffee.py disable --group zwift
+```
+
+交互（全部由插件后台 worker 直接发群消息，网关不再把这些消息转给例程，避免重复回复）：
+1. `@机器人 想喝咖啡` / `@机器人 我在新街口附近来杯生椰拿铁` / `/咖啡 新街口`。没有位置就先问；位置记在
+   `groups/<群>/luckin-state.json`，下次直接用；回「位置 xxx」可改。
+2. 查附近 `max_shops` 家门店 × 饮品，回一条 Markdown 表格（按到手价从低到高编号）+ 数字快捷按钮。
+3. 回编号（可带「热/冰/少糖/大杯」），先 `previewOrder` 算价，回「确认」才 `createOrder`；只有本人能确认，会话 10 分钟过期。
+4. 支付二维码 @ 本人发群里（注明只有本人付），后台轮询最多 15 分钟；付款后 @ 本人发取餐码 + 门店 + 祝福；超时自动取消订单。
+
+限制：每人一小时 2 单、同时只能有 1 单待付、每群每天 20 单（`plugin_bindings.luckin_coffee.config` 可调：
+`allow_members`（谁能用）、`order_members`（谁能下单，其他人只能比价）、`max_orders_per_member_per_hour`、
+`max_orders_per_group_per_day`、`session_minutes`、`pay_timeout_minutes`、`max_shops`、`default_queries`）。
+只支持到店自取。地理编码默认 OpenStreetMap Nominatim（地标识别一般，会把识别结果回显给用户）；放一个高德 Web 服务 Key 到
+`official-bot/amap-key`（或环境变量 `AMAP_KEY`）则改用高德 POI 搜索，更准。

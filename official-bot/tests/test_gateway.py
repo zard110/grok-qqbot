@@ -85,6 +85,25 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(gateway.ref_lookup("same", "A")["text"], "A secret")
             self.assertEqual(gateway.ref_lookup("same", "B")["text"], "B secret")
 
+    def test_coffee_step_is_answered_locally_and_not_forwarded(self):
+        group = "A" * 32
+        action = {"type": "coffee.step", "step": "start", "group_openid": group,
+                  "plugin_id": "luckin_coffee", "config_revision": 1}
+        opener = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = {"post_type": "message", "group_openid": group, "member_openid": "member",
+                       "text_only": "想喝咖啡", "msg_id": "incoming", "delivery_id": "coffee",
+                       "at_me": True, "features": {"at_reply": True}}
+            with patch.object(gateway, "DIR", root), \
+                 patch.object(gateway.G, "group_dir", return_value=root / group), \
+                 patch("core.plugins.dispatch", return_value={"handled": True, "actions": [action], "errors": []}), \
+                 patch("core.action_runner.run_actions", return_value=[{"type": "coffee.step", "result": {"status": "started"}}]), \
+                 patch.object(gateway, "rd", side_effect=lambda path: "https://example.com/webhook-test" if str(path).endswith("url") else "fixture-key"), \
+                 patch.object(gateway.urllib.request, "build_opener", return_value=opener):
+                self.assertEqual(gateway.forward(payload), "accepted")
+        opener.open.assert_not_called()
+
     def test_plugin_memory_action_runs_before_webhook_and_context_is_bounded(self):
         from core import action_runner
         from core.memory import MemoryStore
