@@ -31,6 +31,10 @@
     "knowledge": true
   },
   "style": "本群回复风格，例如：轻量 emoji，【】小标题+编号列表，一次回复合成一条消息。",
+  "reply_policy": {
+    "collection_window_seconds": 0,
+    "natural_repeat_seconds": 0
+  },
   "admins": [
     "<MEMBER_OPENID>"
   ],

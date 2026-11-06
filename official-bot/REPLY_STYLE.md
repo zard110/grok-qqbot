@@ -72,6 +72,81 @@ python3 send_group.py --group "<group_alias>" --image "<推荐结果.path>" --st
 
 来源检查优先于旧日志冷却，同操作重复调用返回既有结果，不产生新占位。两次不同 action_id 处理同一来源时返回 source_event_already_claimed，即使带 --force 也不绕过；这不会影响一个 action 内的长文分段。
 
+## 固定收集窗口
+
+`reply_policy.collection_window_seconds` 是按群设置的秒数，缺省 **0（关闭）**。合法值与其它节奏字段相同：有限数字，0 到 86400。它和 `inbound_debounce` 不是同一个开关。
+
+关闭时（0、未写、群 `enabled` 为 false，或 `features.natural_reply` 为 false）：
+
+- 普通消息仍走原来的同发送者约 3.5 秒 `claim_followup`。不同发送者会打断这次合并，新消息还会把截止时间改成「现在起最多 1.5 秒」，所以它不是固定窗口。
+- `inbound_debounce` 仍是自然话题的前沿抑制：第一条相似自然消息马上转发，窗口内后面的相似自然消息被跳过。它不收集，也不重放。
+- 只 @ 的群不会因为这个字段开始把普通聊天发给例程。
+
+开启时（群启用、`natural_reply` 为 true、秒数大于 0）:
+
+- 截止时间 = 该窗口第一条普通消息写入 inbox 的时间 + 秒数。后面的消息只加入，不后推。
+- 窗口里可以有多个发送者，也包括没有 @ 的问句。
+- 到点后只发 **一次** webhook。`text_only` / `raw_message` 是多行 `昵称: 正文`。`payload.collection.messages` 是逐条副本。
+- `delivery_id` 和 `Idempotency-Key` 用第一条消息的 inbox id。`msg_id` 用窗口内最后一条，方便被动回复。
+- `@机器人` 和以 `/` 开头的命令立刻单独转发，即使窗口还开着。调度器不会为了收集睡满整个窗口。
+- 这次合并后的请求不再走 `inbound_debounce`，避免前沿抑制把整批丢掉。
+- 消息先落在 durable inbox。进程重启后，未到点的窗口继续等到原截止时间；已经开始发送但没有终态回执的，用同一个 anchor id 再发一次。已记录 accepted/skipped/failed/unknown 的不重发。
+- 例程把这一次请求当成一轮。不要按窗口里的每一行再各发一次处理。
+
+例程侧要收到这批普通消息，该群必须本来就会转发非 @ 消息（`natural_reply: true`）。推荐只在现有 `reply_policy` 上增加字段，不要整段替换，以免把其它冷却改回代码默认值：
+
+```json
+"reply_policy": {
+  "collection_window_seconds": 10
+}
+```
+
+回滚：
+
+1. 把该群 `collection_window_seconds` 设为 `0`。之后的新消息立刻回到旧路径。已经打开的窗口仍会在原来的截止时间发一批，然后停止。不需要为了这个字段重启，但进程里必须已经是带本功能的代码。
+2. 若连这一批也不要发：先停 bridge，再在 `runtime.sqlite3` 执行下面的语句，然后启动。
+
+```sql
+DELETE FROM collection_members WHERE rowid IN (
+  SELECT m.rowid FROM collection_members m
+  JOIN collection_windows w ON w.scope = m.scope AND w.generation = m.generation
+  WHERE w.status != 'closed');
+UPDATE inbox SET status = 'pending', error = NULL WHERE status = 'collecting';
+DELETE FROM collection_receipts WHERE status = 'inflight';
+DELETE FROM collection_windows WHERE status != 'closed';
+```
+
+3. 若把代码退回到没有本功能的版本：必须先做第 2 步。否则 `collecting` 行不会被旧调度器取走，这些消息会一直停在库里。
+4. 不要用回滚覆盖本机上比远端更新的 amap / luckin 改动；本功能不修改那两个插件。
+
+## 同一批自然回复守卫
+
+`reply_policy.natural_repeat_seconds` 默认 **0（关闭）**。不写这个字段的群保持原样，包括只 @ 的群和没有打开自然回复的群。它不是 `natural_cooldown`，也不是 `inbound_debounce`。
+
+建议和 10 秒收集窗口一起，只加在需要的那一个群的现有 `reply_policy` 上：
+
+```json
+"collection_window_seconds": 10,
+"natural_repeat_seconds": 180
+```
+
+打开之后：
+
+- 一次自然转发，或一次收集批次，在 sqlite 里原子占住这批消息的 `msg_id`。截止时间是占住的那一刻加上秒数，后来的消息不把截止时间往后推。
+- 同一批里的其它来源，以及窗口内同一话题的自然消息、纯图片、折叠后不超过 4 个字的附和，不再第二次转发。发送侧对仍在 pending/inflight/sent/partial 的自然回复返回 `topic_recently_answered`。并发的多次 `send_group.py` 只有第一次能占住。
+- `@`、以 `/` 开头的命令、以及被现有规则判成新问题的消息照常转发，也可以回答。
+- 有实质内容、而且下面说的话题规则对不上的另一件事，可以再占一轮。
+- 转发没有真正发出去（HTTP 4xx、缺少 webhook）时放开这次占用，同一次收集批次仍可按原来的 anchor 重试。`unknown` 视为可能已经发出，占用保留。
+- 进程重启后占用还在，到期前不会对同一批再答一次。
+
+话题规则只做词面判断，不做语义嵌入：
+
+- 至少 3 个字的连续中文，或至少 3 个字符的英文/数字词，一边包含另一边；或者沿用原来的 token 重叠（交集至少 2，且 Jaccard 不低于 0.65）。
+- 没有共同片段的长改写，收集窗口会把 10 秒内的原文收成一次转发。窗口之外，这种改写仍可能再答一次。四句不同措辞的回复能收成一句，是因为它们对应同一批来源，不是因为比较了回复正文。
+- 很短的附和在守卫打开期间不会单开一轮。一句同样很短、但确实是另一件事、又没有被问句规则认出的话，也会等到这次占用结束。
+
+回滚这个守卫：把该群 `natural_repeat_seconds` 设为 `0`。新消息立刻不再占用。不必删除 `natural_leases`。代码退回旧版时，旧代码不读这张表；收集窗口若已有 `collecting` 行，仍要先做上一节的 SQL。
+
 ## 许可素材包与部署
 
 本次收录 20 张 OpenMoji 原始 PNG，覆盖笑、围观、怀疑、认可、惊讶、感谢、庆祝、猫狗等常用反应，提供对应 20 个可改字模板。它们是开放许可反应图，不是来源不明的影视/角色截图。

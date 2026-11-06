@@ -45,6 +45,8 @@
     "fallback_on_reject": true
   },
   "reply_policy": {
+    "collection_window_seconds": 0,
+    "natural_repeat_seconds": 0,
     "inbound_debounce": 0,
     "natural_cooldown": 0,
     "question_cooldown": 0,
