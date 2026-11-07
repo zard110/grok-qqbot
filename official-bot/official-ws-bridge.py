@@ -24,7 +24,11 @@ from core.settings import DATA_DIR
 from core.files import atomic_write_json, atomic_write_text, append_jsonl, file_lock
 from core.qq_client import client as qq_client
 from core.media import cache_image
-from core.delivery import DeliveryStore, GroupDispatcher, event_identity, snapshot
+from core.collection import CollectionScheduler, armed_window_seconds, is_collection_bypass
+from core.delivery import (
+    SAME_SENDER_FOLLOWUP_SECONDS, DeliveryStore, GroupDispatcher,
+    coalesce_same_sender, event_identity, snapshot,
+)
 DIR = DATA_DIR
 import groups as G  # noqa: E402  per-group registry
 FORWARDER = Path(os.environ.get("QQBOT_FORWARDER_DIR", "/root/forwarder"))
@@ -588,7 +592,7 @@ def should_forward(p: dict) -> tuple[bool, str]:
 def forward(payload: dict) -> str:
     from core.memory import MemoryStore
     from core import conversation
-    from core.reply_policy import event_context, settings, topic_tokens
+    from core.reply_policy import event_context, repeat_window_seconds, settings, topic_tokens, wake_signature
     memory = MemoryStore(DIR)
     scope = payload.get("group_openid") or "c2c:" + str(payload.get("user_openid") or payload.get("member_openid") or "system")
     delivery = DeliveryStore(DIR / "runtime.sqlite3")
@@ -643,14 +647,41 @@ def forward(payload: dict) -> str:
     if not ok and not local_command:
         log(f"gated {payload.get('post_type')} group={payload.get('group_name') or payload.get('group_openid','')[:8]}: {why}")
         return "skipped"
+    repeat_batch = None
+
+    def _drop_unsent_wake(status: str) -> str:
+        # A claim that never reached the webhook must not block the next real wake.
+        if status in {"failed", "skipped"} and repeat_batch and payload.get("group_openid"):
+            try:
+                delivery.release_natural_lease(payload["group_openid"], repeat_batch)
+            except Exception:
+                log("natural lease release failed")
+        return status
+
     if payload.get("post_type") == "message":
         context = payload["reply_context"]
-        if payload.get("group_openid") and context["trigger"] == "natural" and not payload["dialogue"]["pending"]:
+        # A fixed collection window already waited and merged the burst. The
+        # leading-edge natural debounce must not drop that single batch.
+        batched = isinstance(payload.get("collection"), dict)
+        pending = bool((payload.get("dialogue") or {}).get("pending"))
+        if payload.get("group_openid") and not pending and (batched or context["trigger"] == "natural"):
+            window = repeat_window_seconds(G.load_config(payload["group_openid"]))
+            if window > 0:
+                signature = wake_signature(payload)
+                if signature["batch_id"] and not delivery.claim_natural_forward(
+                        scope=payload["group_openid"], batch_id=signature["batch_id"],
+                        sources=signature["sources"], tokens=signature["tokens"],
+                        anchors=signature["anchors"], weak=signature["weak"],
+                        window=window, suppress=not signature["question"]):
+                    log("natural repeat suppressed; message retained in context")
+                    return "skipped"
+                repeat_batch = signature["batch_id"]
+        if (not batched and payload.get("group_openid") and context["trigger"] == "natural" and not pending):
             limits = settings(G.load_config(payload["group_openid"]))
             if not delivery.admit_natural(scope, context["topic_key"],
                     topic_tokens(context["topic_text"]), limits["inbound_debounce"]):
                 log("natural burst debounced; message retained in context")
-                return "skipped"
+                return _drop_unsent_wake("skipped")
     try:
         if payload.get("group_openid"):
             atomic_write_json(G.group_dir(payload["group_openid"]) / "last-forward.json", payload)
@@ -660,14 +691,14 @@ def forward(payload: dict) -> str:
     key = rd(FORWARDER / "key") or rd(DIR.parent / "forwarder-key")
     if not url.startswith("https://") or not key or key.startswith("PLACEHOLDER"):
         log("skip forward: url/key missing")
-        return "failed"
+        return _drop_unsent_wake("failed")
     body = json.dumps(payload, ensure_ascii=False).encode()
     mid = payload.get("message_id")
     try:
         for action in payload.get("plugin_actions", []):
             current = G.load_config(action["group_openid"])
             if not current or current["revision"] != action["config_revision"] or not G.plugin_enabled(action["group_openid"], action["plugin_id"]):
-                return "skipped"
+                return _drop_unsent_wake("skipped")
         req = urllib.request.Request(
             url,
             data=body,
@@ -686,7 +717,7 @@ def forward(payload: dict) -> str:
             return "accepted"
     except urllib.error.HTTPError as e:
         log(f"forward rejected HTTP {e.code}")
-        return "failed" if e.code < 500 else "unknown"
+        return _drop_unsent_wake("failed") if e.code < 500 else "unknown"
     except Exception as e:
         log(f"forward outcome unknown mid={mid}")
         return "unknown"
@@ -726,6 +757,9 @@ class Bridge:
         self.close_code = None
         self.store = DeliveryStore()
         self.store.recover()
+        # Start the flusher before group workers so a pending ordinary message
+        # can park without touching a collector that does not exist yet.
+        self.collector = CollectionScheduler(self.store, self._flush_collected, log=log)
         self.q = GroupDispatcher(self.store, self._dispatch, workers=4)
         self.ack_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="interaction-ack")
         self.ack_slots = threading.BoundedSemaphore(32)
@@ -922,7 +956,59 @@ class Bridge:
         except Exception:
             log("health publication failed")
 
-    def _dispatch(self, ev: dict) -> None:
+    def _collection_decision(self, payload: dict) -> tuple[str, float]:
+        """('enroll'|'bypass'|'', seconds). Empty means the fixed window is disarmed."""
+        if not payload.get("group_openid") or not hasattr(self, "store"):
+            return "", 0.0
+        seconds = armed_window_seconds(group_cfg(payload["group_openid"]))
+        if seconds <= 0:
+            return "", 0.0
+        if is_collection_bypass(payload):
+            return "bypass", seconds
+        return "enroll", seconds
+
+    def _legacy_followup(self, payload: dict) -> None:
+        """Same-sender slide used only when collection_window_seconds is off."""
+        if not payload.get("group_openid") or not payload.get("member_openid") or not hasattr(self, "store"):
+            return
+        if "[自定义表情包" in (payload.get("raw_message") or ""):
+            return
+        scope = "group:" + str(payload["group_openid"])
+        wait = 0.0 if payload.get("at_me") else SAME_SENDER_FOLLOWUP_SECONDS
+
+        def absorb(nxt: dict) -> bool:
+            save_group_event(payload["group_openid"], nxt)
+            follow = to_payload(nxt, self.bot_openid, self.our_group)
+            if not follow or "[自定义表情包" in (follow.get("raw_message") or ""):
+                return False
+            payload["raw_message"] = (payload.get("raw_message") or "") + "\n" + (follow.get("raw_message") or "")
+            payload["text_only"] = "\n".join(
+                part for part in ((payload.get("text_only") or "").strip(), (follow.get("text_only") or "").strip()) if part)
+            payload["attachments"] = (payload.get("attachments") or []) + (follow.get("attachments") or [])
+            payload["message"] = (payload.get("message") or []) + (follow.get("message") or [])
+            payload["msg_id"] = follow.get("msg_id") or payload.get("msg_id")
+            payload["message_id"] = follow.get("message_id") or payload.get("message_id")
+            payload["at_me"] = bool(payload.get("at_me") or follow.get("at_me"))
+            return True
+
+        coalesce_same_sender(self.store, scope, payload["member_openid"], wait_sec=wait, absorb=absorb, sleep=time.sleep)
+
+    def _flush_collected(self, payload: dict) -> str:
+        goid = payload.get("group_openid") or ""
+        cfg = group_cfg(goid) if goid else None
+        if cfg:
+            payload["group_enabled"] = bool(cfg.get("enabled", True))
+            payload["features"] = cfg.get("features") or payload.get("features") or {}
+            if cfg.get("name"):
+                payload["group_name"] = cfg.get("name") or ""
+            aliases = cfg.get("aliases") or []
+            if aliases:
+                payload["group_alias"] = aliases[0]
+        count = len((payload.get("collection") or {}).get("messages") or [])
+        log(f"collection flush group={payload.get('group_alias') or goid[:8]} n={count} delivery={payload.get('delivery_id')}")
+        return forward(payload)
+
+    def _dispatch(self, ev: dict) -> str | None:
         self.last_dispatch_at = time.time()
         t = ev.get("t") or ""
         if t in ("GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE"):
@@ -941,27 +1027,19 @@ class Bridge:
             payload = to_payload(ev, self.bot_openid, self.our_group)
             if payload:
                 payload["delivery_id"] = ev.get("_delivery_id", event_identity(ev)[0])
-                is_sticker = "[自定义表情包" in (payload.get("raw_message") or "")
-                if payload.get("group_openid") and payload.get("member_openid") and not is_sticker and hasattr(self, "store"):
-                    wait_sec = 3.5 if not payload.get("at_me") else 0.0
-                    deadline = time.time() + wait_sec
-                    scope_key = "group:" + str(payload["group_openid"])
-                    while time.time() < deadline:
-                        nxt = self.store.claim_followup(scope_key, payload["member_openid"])
-                        if nxt:
-                            save_group_event(payload["group_openid"], nxt)
-                            p2 = to_payload(nxt, self.bot_openid, self.our_group)
-                            if p2 and "[自定义表情包" not in (p2.get("raw_message") or ""):
-                                payload["raw_message"] = (payload.get("raw_message") or "") + "\n" + (p2.get("raw_message") or "")
-                                payload["text_only"] = "\n".join(x for x in ((payload.get("text_only") or "").strip(), (p2.get("text_only") or "").strip()) if x)
-                                payload["attachments"] = (payload.get("attachments") or []) + (p2.get("attachments") or [])
-                                payload["message"] = (payload.get("message") or []) + (p2.get("message") or [])
-                                payload["msg_id"] = p2.get("msg_id") or payload.get("msg_id")
-                                payload["message_id"] = p2.get("message_id") or payload.get("message_id")
-                                payload["at_me"] = bool(payload.get("at_me") or p2.get("at_me"))
-                                deadline = min(deadline + 1.0, time.time() + 1.5)
-                                continue
-                        time.sleep(0.25)
+                decision, seconds = self._collection_decision(payload)
+                if decision == "enroll":
+                    _, scope = event_identity(ev)
+                    parked = self.store.enroll_collection(
+                        scope=scope, delivery_id=payload["delivery_id"], payload=payload,
+                        window_seconds=seconds)
+                    if parked.get("ordinal") == 1:
+                        log(f"collection open group={payload.get('group_openid','')[:8]} "
+                            f"seconds={seconds:g} deadline={parked['deadline']:.3f}")
+                    self.collector.wake()
+                    return "collecting"
+                if decision != "bypass":
+                    self._legacy_followup(payload)
                 log(
                     f"recv {t} s={ev.get('s')} [{payload.get('group_alias') or payload.get('group_name') or payload['group_openid'][:8]}] "
                     f"from={payload.get('sender', {}).get('nickname')} "

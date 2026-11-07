@@ -198,7 +198,9 @@ tail -n 20 /workspace/qq-bot-persist/official-bot/official-ws-bridge.log
    ```
    - `at_reply`: 被 `@` 时是否回复（默认开启）。
    - `natural_reply`: 未被 `@` 时是否将群消息转发给 Grok Bot 例程判断自然插话（开启后机器人能像真实群友一样顺着话题接梗）。
-   - 修改 `config.json` 或 `prompt.md` 后**立即生效**，无需重启网关。
+   - `reply_policy.collection_window_seconds`: 固定收集窗口，默认 `0` 关闭。设为 `10` 时，从第一条普通非 @ 消息起固定等 10 秒，再把窗口内多人的消息合成一次转发；`@` 和 `/` 命令仍马上单独转发。只 @ 的群不受影响。
+   - `reply_policy.natural_repeat_seconds`: 同一批自然回复守卫，默认 `0` 关闭。未写这个字段的群（包括只 @ 的群）不会改变现有行为。语义、边界和回滚见 `official-bot/REPLY_STYLE.md`。
+   - 修改 `config.json` 或 `prompt.md` 后**立即生效**，无需重启网关。代码本身更新后仍需重启 bridge 才会跑到新逻辑。
 
 ---
 

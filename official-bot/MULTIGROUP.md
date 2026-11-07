@@ -75,6 +75,24 @@ official-bot/
 4. 发消息：`python3 send_group.py --group ai-lab --markdown "..."`。
 5. 想先手动建（机器人还没进群）：`python3 -c "import sys;sys.path.insert(0,'.');import groups as G;G.ensure_group('<openid>','群名')"`。
 
+## 固定收集窗口
+
+在群 `config.json` 的 `reply_policy` 里增加（不要删掉该群已有的其它节奏字段）：
+
+```json
+"reply_policy": {
+  "collection_window_seconds": 10,
+  "natural_repeat_seconds": 180
+}
+```
+
+- 默认 `0`，关闭。关闭时行为和以前一样，包括同发送者约 3.5 秒合并，以及 `inbound_debounce` 的前沿抑制。
+- 大于 0，且本群 `enabled` 和 `features.natural_reply` 都为 true：从第一条普通消息（不是 @ 机器人，也不是 `/` 命令）入库时起固定等这么多秒，然后把这段时间内各群友的普通消息合成 **一次** 转发给例程。新消息不会把截止时间往后推。
+- `@` 和 `/` 命令在窗口期间也马上单独转发，不会被收集拖住。
+- 只 @ 的群（`natural_reply` 为 false）以及 `enabled: false` 的群不会进入这个窗口。
+- `natural_repeat_seconds` 同样默认 `0`。只有写成大于 0 的群，才会把同一批自然消息的后续转发和自然回复收成一次。其它群、只 @ 的群不要加这个字段。
+- 详细语义、做不到的相似判断、重启和回滚见 [REPLY_STYLE.md](REPLY_STYLE.md) 的「固定收集窗口」。
+
 ## 开关功能
 - 直接改 JSON，比如关掉某群插话：`"natural_reply": false`；整个群停用：`"enabled": false`（send_group.py 也会拒发，exit 4）。
 - 推送类例程加 `--feature daily_ai_news` 或 `--feature x_info_push`：开关没开就 exit 4，不会发出去。
