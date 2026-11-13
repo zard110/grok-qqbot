@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -20,8 +21,71 @@ class ReplySuppressed(ValueError):
     """An intentional policy skip; no network request has been started."""
 
 
+# TLS 1.2/1.3 Application Data record. A recycled gateway fd writes this at offset 0.
+TLS_APPLICATION_DATA = b"\x17\x03\x03"
+_NOT_A_DATABASE = "file is not a database"
+
+
 def stable_id(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def sqlite_header_is_tls_record(path: Path) -> bool:
+    try:
+        with Path(path).open("rb") as handle:
+            return handle.read(3) == TLS_APPLICATION_DATA
+    except OSError:
+        return False
+
+
+def quarantine_tls_corrupted_sqlite(path: Path) -> Path | None:
+    """Move a database whose header is one TLS record so startup can create a new store.
+
+    The surviving pages stay in the backup for forensics. They are not replayed:
+    the header (page size, salts) is the part that was overwritten.
+    """
+    path = Path(path)
+    if not sqlite_header_is_tls_record(path):
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.corrupt-bak-{stamp}")
+    sequence = 0
+    while dest.exists():
+        sequence += 1
+        dest = path.with_name(f"{path.name}.corrupt-bak-{stamp}-{sequence}")
+    path.replace(dest)
+    for suffix in ("-wal", "-shm"):
+        side = Path(str(path) + suffix)
+        if not side.exists():
+            continue
+        try:
+            side.replace(Path(str(dest) + suffix))
+        except OSError:
+            pass
+    print(time.strftime("[%F %T] ") + f"quarantined TLS-corrupted sqlite as {dest.name}", flush=True)
+    return dest
+
+
+def is_not_a_database(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.Error) and _NOT_A_DATABASE in str(exc).lower()
+
+
+def abort_corrupt_runtime(exc: BaseException | None = None) -> None:
+    """Exit so the supervisor restarts instead of staying up and dropping events."""
+    del exc
+    try:
+        print(
+            time.strftime("[%F %T] ") + "runtime sqlite is not a database; exiting for supervisor restart",
+            flush=True,
+        )
+    except Exception:
+        pass
+    os._exit(4)
+
+
+def abort_if_not_a_database(exc: BaseException) -> None:
+    if is_not_a_database(exc):
+        abort_corrupt_runtime(exc)
 
 
 def event_identity(event: dict) -> tuple[str, str]:
@@ -33,9 +97,16 @@ def event_identity(event: dict) -> tuple[str, str]:
 
 
 class DeliveryStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, fatal_on_corrupt: bool = False, recover_tls_header: bool = True):
         self.path = Path(path or DATA_DIR / "runtime.sqlite3")
+        self.fatal_on_corrupt = fatal_on_corrupt
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Startup crash-loop: the previous process died on this header. Move it
+        # aside before the first connection. A live bridge passes
+        # recover_tls_header=False so a fresh overwrite exits instead of being
+        # rebuilt underneath threads that still hold the old file.
+        if recover_tls_header:
+            quarantine_tls_corrupted_sqlite(self.path)
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -91,14 +162,31 @@ class DeliveryStore:
         for suffix in ("", "-wal", "-shm"):
             ensure_shared_perms(Path(str(self.path) + suffix))
 
+    def _abort_if_runtime_tls_header(self) -> None:
+        if self.fatal_on_corrupt and sqlite_header_is_tls_record(self.path):
+            abort_corrupt_runtime()
+            raise sqlite3.DatabaseError("file is not a database")
+
+    def _abort_if_runtime_corrupt(self, exc: BaseException) -> None:
+        if self.fatal_on_corrupt and is_not_a_database(exc):
+            abort_corrupt_runtime(exc)
+
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=15)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA busy_timeout=15000")
+        self._abort_if_runtime_tls_header()
+        try:
+            db = sqlite3.connect(self.path, timeout=15)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=15000")
+        except sqlite3.Error as exc:
+            self._abort_if_runtime_corrupt(exc)
+            raise
         try:
             with db:
                 yield db
+        except sqlite3.Error as exc:
+            self._abort_if_runtime_corrupt(exc)
+            raise
         finally:
             db.close()
 
@@ -546,12 +634,16 @@ class GroupDispatcher:
                         else:
                             with self._lock:
                                 self._active.discard(row["scope"])
-                    except Exception:
+                    except Exception as exc:
+                        abort_if_not_a_database(exc)
                         with self._lock:
                             self._active.discard(row["scope"])
                         raise
                 self.last_error = None
-            except Exception:
+            except Exception as exc:
+                # Swallowing this used to leave the gateway "online" while inbox
+                # writes failed. Exit so the supervisor restarts onto a recovered file.
+                abort_if_not_a_database(exc)
                 self.last_error = "Durable scheduler storage unavailable"
             self._wake.wait(.25)
             self._wake.clear()
@@ -565,9 +657,13 @@ class GroupDispatcher:
             # before this worker sleeps or forwards. Do not overwrite that status.
             if result != "collecting":
                 self.store.finish(row["id"], result or "skipped")
-        except Exception:
-            # A generic handler exception may follow a successful external call.
-            self.store.finish(row["id"], "unknown", "Handler did not produce a confirmed outcome")
+        except Exception as exc:
+            abort_if_not_a_database(exc)
+            try:
+                # A generic handler exception may follow a successful external call.
+                self.store.finish(row["id"], "unknown", "Handler did not produce a confirmed outcome")
+            except Exception as finish_exc:
+                abort_if_not_a_database(finish_exc)
         finally:
             with self._lock:
                 self._active.discard(row["scope"])
