@@ -27,7 +27,7 @@ from core.media import cache_image
 from core.collection import CollectionScheduler, armed_window_seconds, is_collection_bypass
 from core.delivery import (
     SAME_SENDER_FOLLOWUP_SECONDS, DeliveryStore, GroupDispatcher,
-    coalesce_same_sender, event_identity, snapshot,
+    abort_if_not_a_database, coalesce_same_sender, event_identity, snapshot,
 )
 DIR = DATA_DIR
 import groups as G  # noqa: E402  per-group registry
@@ -595,7 +595,9 @@ def forward(payload: dict) -> str:
     from core.reply_policy import event_context, repeat_window_seconds, settings, topic_tokens, wake_signature
     memory = MemoryStore(DIR)
     scope = payload.get("group_openid") or "c2c:" + str(payload.get("user_openid") or payload.get("member_openid") or "system")
-    delivery = DeliveryStore(DIR / "runtime.sqlite3")
+    # Do not rebuild a TLS-smashed file here. This process is already running;
+    # exiting lets the supervisor start a process that quarantines it first.
+    delivery = DeliveryStore(DIR / "runtime.sqlite3", fatal_on_corrupt=True, recover_tls_header=False)
     if payload.get("post_type") in {"message", "interaction"}:
         payload["reply_context"] = event_context(payload)
         target = "/v2/groups/" + scope if payload.get("group_openid") else "/v2/users/" + scope[4:]
@@ -737,6 +739,8 @@ class Bridge:
 
     SOCK_TIMEOUT = 15          # seconds; bounds ws.send / partial reads
     ACK_LOG_EVERY = 10         # log 'ack ok' every N acks (~7 min) + first ack per connection
+    # A wait this far past the heartbeat interval is a suspend/resume gap, not jitter.
+    STALE_HEARTBEAT_SLACK = 15.0
 
     def __init__(self) -> None:
         self.seq = None            # last dispatch seq (op0 "s"); kept across reconnects for RESUME
@@ -755,7 +759,12 @@ class Bridge:
         self.resume_failures = 0
         self.force_identify = False
         self.close_code = None
-        self.store = DeliveryStore()
+        # RLock: SIGUSR1 runs on the main thread and may interrupt _send, which
+        # already holds this lock. A plain Lock would deadlock the handler.
+        self._send_lock = threading.RLock()
+        self._generation = 0
+        self._dead = False
+        self.store = DeliveryStore(fatal_on_corrupt=True)
         self.store.recover()
         # Start the flusher before group workers so a pending ordinary message
         # can park without touching a collector that does not exist yet.
@@ -777,24 +786,76 @@ class Bridge:
         return max(60.0, self.heartbeat_ms / 1000.0 * 1.5)
 
     def _send(self, ws, obj: dict) -> None:
-        ws.send(json.dumps(obj))
+        """Send under the same lock as _kill_socket. A dead generation must not write."""
+        payload = json.dumps(obj)
+        with self._send_lock:
+            if self._dead or getattr(ws, "_bridge_generation", None) != self._generation:
+                raise ConnectionError("gateway connection is closed")
+            web = getattr(ws, "sock", None)
+            if web is None or not getattr(web, "connected", False):
+                raise ConnectionError("gateway connection is closed")
+            ws.send(payload)
 
     def _kill_socket(self, ws, why: str) -> None:
-        """Force the run_forever loop to return even if a send/recv is hung."""
+        """Unblock run_forever without releasing the TLS file descriptor.
+
+        Watchdog, heartbeat, and SIGUSR1 used to ``close()`` the SSL socket from
+        another thread. ``close()`` frees the fd number while OpenSSL can still
+        ``write()`` it. DeliveryStore opens runtime.sqlite3 on the recycled
+        number (one connection per operation). SQLite uses pread/pwrite, so the
+        new fd's offset stays 0 and that write replaces the database header
+        with one TLS Application Data record (``17 03 03``). ``shutdown``
+        wakes the reader and keeps the number owned until the run_forever
+        thread closes it. ``connected`` is cleared first so teardown does not
+        send a WebSocket close frame, the 32-byte form of the same overwrite.
+        """
         log(f"forcing reconnect: {why}")
+        if ws is None:
+            return
         try:
             ws.keep_running = False
         except Exception:
             pass
+        with self._send_lock:
+            if getattr(ws, "_bridge_generation", None) == self._generation:
+                self._dead = True
+            self._shutdown_socket(ws)
+
+    def _shutdown_socket(self, ws) -> None:
+        web = getattr(ws, "sock", None)
+        if web is None:
+            return
         try:
-            raw = ws.sock.sock if ws.sock else None
-            if raw:
-                raw.shutdown(socket.SHUT_RDWR)
+            web.connected = False
         except Exception:
             pass
+        raw = getattr(web, "sock", None)
+        # Install the closer once. run_forever calls it on the reader thread.
+        # It must not send a close frame, and this thread must not call it.
+        if raw is not None and getattr(web, "_bridge_close", None) is None:
+            def _close_on_owner(*_args, **_kwargs):
+                try:
+                    raw.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    raw.close()
+                except Exception:
+                    pass
+                try:
+                    web.sock = None
+                    web.connected = False
+                except Exception:
+                    pass
+            try:
+                web._bridge_close = _close_on_owner
+                web.close = _close_on_owner
+            except Exception:
+                pass
+        if raw is None:
+            return
         try:
-            if ws.sock and ws.sock.sock:
-                ws.sock.sock.close()
+            raw.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
 
@@ -808,15 +869,29 @@ class Bridge:
 
     # ---------- per-connection threads ----------
     def _heartbeat_loop(self, ws, stop: threading.Event) -> None:
-        while not stop.wait(self.heartbeat_ms / 1000.0):
+        while not stop.is_set():
+            period = self.heartbeat_ms / 1000.0
+            if period <= 0:
+                period = 1.0
+            started = time.monotonic()
+            if stop.wait(period):
+                return
+            elapsed = time.monotonic() - started
+            # Suspend/resume delivers this wait long after the interval, often in
+            # the same second the watchdog forces a reconnect. Do not write a
+            # heartbeat into that race; the watchdog reconnects from the ACK gap.
+            if elapsed > period + self.STALE_HEARTBEAT_SLACK:
+                log(f"heartbeat skipped after {elapsed:.0f}s monotonic gap; watchdog will reconnect")
+                continue
             try:
                 self.last_hb_sent = time.time()
                 self._send(ws, {"op": 1, "d": self.seq})
                 log(f"heartbeat seq={self.seq}")
             except Exception as e:
+                if stop.is_set() or self._dead or getattr(ws, "_bridge_generation", None) != self._generation:
+                    return
                 log(f"heartbeat send error: {e!r}")
-                if not stop.is_set():
-                    self._kill_socket(ws, "heartbeat send failed")
+                self._kill_socket(ws, "heartbeat send failed")
                 return
 
     def _watchdog_loop(self, ws, stop: threading.Event) -> None:
@@ -953,7 +1028,8 @@ class Bridge:
                 "last_dispatch_at": self.last_dispatch_at,
                 "dispatcher_error": self.q.last_error, **snapshot(self.store.path),
             })
-        except Exception:
+        except Exception as exc:
+            abort_if_not_a_database(exc)
             log("health publication failed")
 
     def _collection_decision(self, payload: dict) -> tuple[str, float]:
@@ -1106,6 +1182,11 @@ class Bridge:
             self._stop.set()           # stop threads of the previous connection
             self._stop = threading.Event()
             self.close_code = None
+            with self._send_lock:
+                # Old heartbeats carry the previous generation and must not send
+                # after this flips _dead back to False.
+                self._generation += 1
+                self._dead = False
             delay = 3
             try:
                 token = self.ensure_token()
@@ -1118,6 +1199,7 @@ class Bridge:
                     on_error=self.on_error,
                     on_close=self.on_close,
                 )
+                self.ws._bridge_generation = self._generation
                 self.ws.run_forever(ping_interval=0, sockopt=tuple(sockopt), reconnect=0)
             except Exception as e:
                 log(f"loop error: {e}")

@@ -16,6 +16,7 @@ import copy
 import threading
 import time
 
+from .delivery import abort_if_not_a_database
 from .reply_policy import settings
 
 
@@ -152,6 +153,7 @@ class CollectionScheduler:
         try:
             due = self.store.lease_due_collections(now)
         except Exception as exc:
+            abort_if_not_a_database(exc)
             self.log(f"collection lease failed: {exc!r}")
             return
         for window in due:
@@ -173,10 +175,12 @@ class CollectionScheduler:
                 outcome = "unknown"
             self.store.complete_collection(scope, generation, outcome or "skipped")
         except Exception as exc:
+            abort_if_not_a_database(exc)
             self.log(f"collection window failed: {exc!r}")
             try:
                 self.store.complete_collection(scope, generation, "unknown", str(exc)[:300])
-            except Exception:
+            except Exception as finish_exc:
+                abort_if_not_a_database(finish_exc)
                 self.log("collection window could not be completed")
 
     def _loop(self) -> None:
@@ -184,12 +188,14 @@ class CollectionScheduler:
             try:
                 self.poll()
             except Exception as exc:
+                abort_if_not_a_database(exc)
                 self.log(f"collection poll failed: {exc!r}")
             if self._stop.is_set():
                 return
             try:
                 delay = self.store.seconds_until_collection_due(self.clock())
             except Exception as exc:
+                abort_if_not_a_database(exc)
                 self.log(f"collection timer failed: {exc!r}")
                 delay = None
             if delay is None:
